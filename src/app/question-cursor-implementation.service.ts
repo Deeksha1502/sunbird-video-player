@@ -34,7 +34,7 @@ export class QuestionCursorImplementationService implements QuestionCursor {
             return this.http.get(`${this.baseUrl}/learner/questionset/v1/hierarchy/${id}?fields=maxScore`);
         });
         return forkJoin(requests).pipe(
-            map(res => {
+            map((res:any) => {
                 return res.map(item => _.get(item, 'result.questionSet.maxScore'));
             })
         );

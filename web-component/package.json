@@ -1,8 +1,8 @@
 {
   "name": "@project-sunbird/sunbird-video-player-web-component",
-  "version": "1.3.0",
+  "version": "2.0.0",
   "description": "The web component package for the sunbird video player",
-  "main": "sunbird-video-player.js",
+  "main": "assets/video-player/sunbird-video-player.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
   },
