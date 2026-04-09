@@ -32,7 +32,7 @@ describe('SunbirdVideoPlayerComponent', () => {
     jasmine.clock().install();
   });
 
-  afterEach(function() {
+  afterEach(function () {
     jasmine.clock().uninstall();
   });
   it('should create SunbirdVideoPlayerComponent', () => {
@@ -57,7 +57,9 @@ describe('SunbirdVideoPlayerComponent', () => {
     const event = {};
     spyOn(component.playerEvent, 'emit').and.callThrough();
     spyOn(component.viewerService, 'raiseHeartBeatEvent').and.callFake(() => 'true');
+    spyOn(component.viewerService, 'raiseEndEvent');
     component.exitContent(event);
+    expect(component.viewerService.raiseEndEvent).toHaveBeenCalled();
     expect(component.playerEvent.emit).toHaveBeenCalledWith({});
     expect(component.viewerService.raiseHeartBeatEvent).toHaveBeenCalledWith('EXIT');
   });

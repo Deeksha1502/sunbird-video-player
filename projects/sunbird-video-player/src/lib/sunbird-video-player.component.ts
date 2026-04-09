@@ -2,7 +2,7 @@ import {
   ChangeDetectorRef, Component, EventEmitter, Input, OnInit, Output, OnChanges, SimpleChanges,
   HostListener, ElementRef, ViewChild, AfterViewInit, Renderer2, OnDestroy
 } from '@angular/core';
-import { ErrorService , errorCode , errorMessage, ISideBarEvent } from '@project-sunbird/sunbird-player-sdk-v9';
+import { ErrorService, errorCode, errorMessage, ISideBarEvent } from '@project-sunbird/sunbird-player-sdk-v9';
 
 import { PlayerConfig } from './playerInterfaces';
 import { IAction } from './playerInterfaces';
@@ -74,8 +74,8 @@ export class SunbirdVideoPlayerComponent implements OnInit, AfterViewInit, OnDes
         let code = errorCode.contentLoadFails,
           message = errorMessage.contentLoadFails;
         if (this.viewerService.isAvailableLocally) {
-            code = errorCode.contentLoadFails;
-            message = errorMessage.contentLoadFails;
+          code = errorCode.contentLoadFails;
+          message = errorMessage.contentLoadFails;
         }
         if (code === errorCode.contentLoadFails) {
           this.showContentError = true;
@@ -102,14 +102,14 @@ export class SunbirdVideoPlayerComponent implements OnInit, AfterViewInit, OnDes
   ngOnInit() {
     this.isInitialized = true;
     if (this.playerConfig) {
-    if (typeof this.playerConfig === 'string') {
-      try {
-        this.playerConfig = JSON.parse(this.playerConfig);
-      } catch (error) {
-        console.error('Invalid playerConfig: ', error);
+      if (typeof this.playerConfig === 'string') {
+        try {
+          this.playerConfig = JSON.parse(this.playerConfig);
+        } catch (error) {
+          console.error('Invalid playerConfig: ', error);
+        }
       }
     }
-  }
     setInterval(() => {
       if (!this.isPaused) {
         this.showControls = false;
@@ -122,7 +122,7 @@ export class SunbirdVideoPlayerComponent implements OnInit, AfterViewInit, OnDes
     this.sideMenuConfig = { ...this.sideMenuConfig, ...this.playerConfig.config.sideMenu };
     this.videoPlayerService.initialize(this.playerConfig);
     this.viewerService.initialize(this.playerConfig);
-    window.addEventListener('offline', this.raiseInternetDisconnectionError , true);
+    window.addEventListener('offline', this.raiseInternetDisconnectionError, true);
     this.QumlPlayerConfig.config = this.playerConfig.config;
     this.QumlPlayerConfig.config.sideMenu.enable = false;
     this.QumlPlayerConfig.context = this.playerConfig.context;
@@ -191,7 +191,7 @@ export class SunbirdVideoPlayerComponent implements OnInit, AfterViewInit, OnDes
         this.QumlPlayerConfig.context.objectRollup = {};
       }
       const levels = Object.keys(this.QumlPlayerConfig.context.objectRollup);
-      this.QumlPlayerConfig.context.objectRollup[`l${levels.length +  1}`] = id;
+      this.QumlPlayerConfig.context.objectRollup[`l${levels.length + 1}`] = id;
     }
   }
 
@@ -208,6 +208,11 @@ export class SunbirdVideoPlayerComponent implements OnInit, AfterViewInit, OnDes
   }
 
   exitContent(event) {
+    try {
+      this.viewerService.raiseEndEvent(true);
+    } catch (error) {
+      console.error('Error while raising end event: ', error);
+    }
     this.playerEvent.emit(event);
     this.viewerService.raiseHeartBeatEvent('EXIT');
   }
@@ -242,13 +247,13 @@ export class SunbirdVideoPlayerComponent implements OnInit, AfterViewInit, OnDes
       if (!document.fullscreenElement && this.isFullScreen) {
         if (document.getElementsByClassName('video-js')[0]) {
           document.getElementsByClassName('video-js')[0].requestFullscreen()
-          .catch((err) => console.error(err));
+            .catch((err) => console.error(err));
         }
       }
     }
   }
 
-  questionSetData({response, time, identifier}) {
+  questionSetData({ response, time, identifier }) {
     this.QumlPlayerConfig.metadata = response;
     this.QumlPlayerConfig.metadata['showStartPage'] = 'No';
     this.QumlPlayerConfig.metadata['showEndPage'] = 'No';
@@ -257,7 +262,7 @@ export class SunbirdVideoPlayerComponent implements OnInit, AfterViewInit, OnDes
     if (document.fullscreenElement) {
       this.isFullScreen = true;
       document.exitFullscreen()
-      .catch((err) => console.error(err));
+        .catch((err) => console.error(err));
     } else {
       this.isFullScreen = false;
     }
@@ -280,6 +285,6 @@ export class SunbirdVideoPlayerComponent implements OnInit, AfterViewInit, OnDes
     this.unlistenTouchStart();
     this.unlistenMouseMove();
     this.viewerService.isEndEventRaised = false;
-    window.removeEventListener('offline', this.raiseInternetDisconnectionError , true);
+    window.removeEventListener('offline', this.raiseInternetDisconnectionError, true);
   }
 }

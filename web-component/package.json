@@ -1,6 +1,6 @@
 {
   "name": "@project-sunbird/sunbird-video-player-web-component",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "The web component package for the sunbird video player",
   "main": "assets/video-player/sunbird-video-player.js",
   "scripts": {
