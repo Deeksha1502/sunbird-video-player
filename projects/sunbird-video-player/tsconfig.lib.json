@@ -10,7 +10,6 @@
     "inlineSources": true,
     "experimentalDecorators": true,
     "importHelpers": true,
-    "types": ["./src/typings"],
     "lib": [
       "dom",
       "es2018"

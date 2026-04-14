@@ -1,8 +1,7 @@
 {
   "extends": "../../tsconfig.json",
   "compilerOptions": {
-    "outDir": "../../out-tsc/app",
-    "types": ["./src/typings"]
+    "outDir": "../../out-tsc/app"
   },
   "files": [
     "src/main.ts",
@@ -10,6 +9,7 @@
   ],
   "include": [
     "src/*.d.ts",
-    "src/**/*.d.ts"
+    "src/**/*.d.ts",
+    "src/environments/**/*.ts"
   ]
 }

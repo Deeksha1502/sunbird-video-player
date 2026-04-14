@@ -15,10 +15,10 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '22.15.0'
+          node-version: '22.21.1'
       
       - name: Install dependencies
-        run: npm ci --legacy-peer-deps
+        run: npm i --legacy-peer-deps
   
       - name: Build and publish package
         env:
@@ -27,5 +27,5 @@ jobs:
           npm run build-lib
           npm pack ./dist/sunbird-video-player
           echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > ~/.npmrc
-          npm publish project-sunbird-sunbird-video-player-v9-*
+          npm publish project-sunbird-sunbird-video-player-v9-* --access public
       

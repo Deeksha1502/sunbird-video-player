@@ -34,7 +34,7 @@ export class QCImplementationService implements QuestionCursor {
             return this.http.get(`${this.questionSetBaseUrl}/v1/hierarchy/${id}?fields=maxScore`);
         });
         return forkJoin(requests).pipe(
-            map(res => {
+            map((res: any) => {
                 return res.map((item: any) => item.result.questionSet.maxScore);
             })
         );

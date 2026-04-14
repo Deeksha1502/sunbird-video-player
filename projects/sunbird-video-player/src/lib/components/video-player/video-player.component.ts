@@ -3,16 +3,18 @@ import { AfterViewInit, Component, ElementRef, EventEmitter, Input, OnDestroy, O
    Renderer2, ViewChild, ViewEncapsulation, OnInit, Optional, ChangeDetectorRef } from '@angular/core';
 import { QuestionCursor } from '@project-sunbird/sunbird-quml-player-v9';
 import * as _ from 'lodash-es';
+import videojs from 'video.js';
 import 'videojs-contrib-quality-levels';
 import videojshttpsourceselector from 'videojs-http-source-selector';
 import { ViewerService } from '../../services/viewer.service';
 import { IAction } from '../../playerInterfaces';
 
 @Component({
+  // eslint-disable-next-line @angular-eslint/prefer-standalone
+  standalone: false,
   selector: 'video-player',
   templateUrl: './video-player.component.html',
-  styleUrls: ['./video-player.component.scss'],
-  encapsulation: ViewEncapsulation.None
+  styleUrls: ['./video-player.component.scss']
 })
 export class VideoPlayerComponent implements AfterViewInit, OnInit, OnDestroy, OnChanges {
   @Input() config: any;
@@ -77,7 +79,7 @@ export class VideoPlayerComponent implements AfterViewInit, OnInit, OnDestroy, O
           nativeAudioTracks: false,
           nativeVideoTracks: false,
         }
-      });
+      } as any);
       this.player.videojshttpsourceselector = videojshttpsourceselector;
       this.player.videojshttpsourceselector();
       const markers = this.viewerService.getMarkers();

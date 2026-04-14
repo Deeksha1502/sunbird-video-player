@@ -46,6 +46,40 @@
         "plugin:@angular-eslint/template/recommended"
       ],
       "rules": {}
+    },
+    {
+      "files": [
+        "projects/sunbird-video-player/**/*.ts"
+      ],
+      "parserOptions": {
+        "project": [
+          "projects/sunbird-video-player/tsconfig.lib.json",
+          "projects/sunbird-video-player/tsconfig.spec.json"
+        ],
+        "createDefaultProgram": true
+      },
+      "extends": [
+        "plugin:@angular-eslint/recommended",
+        "plugin:@angular-eslint/template/process-inline-templates",
+        "plugin:@typescript-eslint/recommended"
+      ],
+      "rules": {}
+    },
+    {
+      "files": [
+        "projects/video-player-wc/**/*.ts"
+      ],
+      "parserOptions": {
+        "project": [
+          "projects/video-player-wc/tsconfig.app.json",
+          "projects/video-player-wc/tsconfig.spec.json"
+        ],
+        "createDefaultProgram": true
+      },
+      "extends": [
+        "plugin:@angular-eslint/recommended"
+      ],
+      "rules": {}
     }
   ]
 }
