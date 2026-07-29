@@ -33,6 +33,12 @@ export class ViewerService {
   public visitedLength = 0;
   public uniqueVisitedLength;
   public sidebarMenuEvent = new EventEmitter<any>();
+  // Emits whenever transcripts are updated after initial load (e.g. a
+  // generate-transcript job completing while the player is already mounted).
+  // handleTranscriptsData() itself only recomputes from whatever is already
+  // in `this.transcripts` - updateTranscripts() is the entry point for
+  // pushing in genuinely new data from outside.
+  public transcriptsUpdated = new EventEmitter<Transcripts>();
   public traceId: string;
   public isAvailableLocally = false;
   public interceptionPoints: any;
@@ -85,6 +91,16 @@ export class ViewerService {
       const basePath = (metadata.streamingUrl) ? (metadata.streamingUrl) : (metadata.basePath || metadata.baseDir);
       this.streamingUrl = `${basePath}/${metadata.artifactUrl}`;
       this.mimeType = metadata.mimeType;
+      // Transcript/caption files ship inside the same offline .ecar bundle as
+      // the video and are expected to be relative paths, same as
+      // metadata.artifactUrl above - without this they'd resolve against the
+      // page origin instead of the local content basePath and fail to load
+      // when playing offline (e.g. downloaded content in the mobile app).
+      this.transcripts = this.transcripts.map((trans) => ({
+        ...trans,
+        artifactUrl: trans.artifactUrl ? `${basePath}/${trans.artifactUrl}` : trans.artifactUrl,
+        wordByWordUrl: trans.wordByWordUrl ? `${basePath}/${trans.wordByWordUrl}` : trans.wordByWordUrl
+      }));
     }
   }
   handleTranscriptsData(selectedTranscripts) {
@@ -106,6 +122,11 @@ export class ViewerService {
       });
     }
     return this.transcripts;
+  }
+
+  updateTranscripts(transcripts: Transcripts) {
+    this.transcripts = transcripts || [];
+    this.transcriptsUpdated.emit(this.transcripts);
   }
   async getPlayerOptions() {
     if (!this.streamingUrl) {

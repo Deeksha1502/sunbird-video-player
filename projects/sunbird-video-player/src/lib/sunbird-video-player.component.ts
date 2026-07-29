@@ -43,6 +43,13 @@ export class SunbirdVideoPlayerComponent implements OnInit, AfterViewInit, OnDes
   isFullScreen = false;
   playerAction: IAction;
   public isInitialized = false;
+  // Raw transcripts payload from the last playerConfig applied, kept
+  // separate from viewerService.transcripts (which handlePlayerConfigUpdate
+  // compares against) - viewerService.transcripts gets mutated in place
+  // (offline basePath prefixing, default-language flagging), so comparing
+  // a fresh incoming payload against it would spuriously look "changed" on
+  // every update, even when the host pushed the exact same transcripts.
+  private lastRawTranscripts: any;
 
   constructor(
     public videoPlayerService: SunbirdVideoPlayerService,
@@ -118,6 +125,7 @@ export class SunbirdVideoPlayerComponent implements OnInit, AfterViewInit, OnDes
 
     /* eslint-disable @typescript-eslint/dot-notation */
     this.nextContent = this.playerConfig?.config?.nextContent;
+    this.lastRawTranscripts = this.playerConfig?.metadata?.transcripts;
     this.traceId = this.playerConfig.config['traceId'];
     this.sideMenuConfig = { ...this.sideMenuConfig, ...this.playerConfig.config.sideMenu };
     this.videoPlayerService.initialize(this.playerConfig);
@@ -138,6 +146,32 @@ export class SunbirdVideoPlayerComponent implements OnInit, AfterViewInit, OnDes
     if (changes?.playerConfig?.firstChange && this.isInitialized) {
       // Calling for web component explicitly and life cycle works in different order
       this.ngOnInit();
+    } else if (changes?.playerConfig && !changes.playerConfig.firstChange && this.isInitialized) {
+      // A genuine subsequent playerConfig update (e.g. host pushes newly-generated
+      // transcripts while the player is already mounted) - deliberately does NOT
+      // re-run ngOnInit(), which would tear down/recreate state and interrupt
+      // playback. Only transcripts are hot-swappable today; other playerConfig
+      // fields are still effectively fixed after first load.
+      this.handlePlayerConfigUpdate(changes.playerConfig.currentValue);
+    }
+  }
+
+  private handlePlayerConfigUpdate(rawConfig: PlayerConfig | string) {
+    let parsedConfig: PlayerConfig;
+    if (typeof rawConfig === 'string') {
+      try {
+        parsedConfig = JSON.parse(rawConfig);
+      } catch (error) {
+        console.error('Invalid playerConfig update: ', error);
+        return;
+      }
+    } else {
+      parsedConfig = rawConfig;
+    }
+    const newTranscripts = parsedConfig?.metadata?.transcripts;
+    if (newTranscripts && JSON.stringify(newTranscripts) !== JSON.stringify(this.lastRawTranscripts)) {
+      this.lastRawTranscripts = newTranscripts;
+      this.viewerService.updateTranscripts(newTranscripts);
     }
   }
 

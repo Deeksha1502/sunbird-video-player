@@ -1,6 +1,12 @@
-<video #target class="video-js" controls crossorigin="anonymous" (loadeddata)="onLoadMetadata($event)">
-  <track *ngFor="let trans of transcripts" default="{{trans.default}}" kind="captions" src="{{trans.artifactUrl}}" srclang="{{trans.languageCode}}" label="{{trans.language}}" >
-</video>
+<!-- Transcript/caption <track> elements are attached imperatively via
+     player.addRemoteTextTrack() in video-player.component.ts (see
+     attachTranscriptTracks/syncTranscriptTracks) rather than declared here.
+     video.js's removeRemoteTextTrack() - needed to support transcripts
+     updating after initial load - only works on tracks added that way, not
+     on statically-declared HTML <track> elements, so ALL tracks (including
+     the first ones) go through the same imperative path for consistency. -->
+<video #target class="video-js" controls crossorigin="anonymous" (loadeddata)="onLoadMetadata($event)"></video>
+<div #wordHighlightOverlay class="word-highlight-overlay" [class.word-highlight-overlay--hidden]="!showWordHighlightOverlay"><span #wordHighlightLine></span></div>
 <div #controlDiv>
   <div [ngClass]="{'player-for-back-ward-controls': currentPlayerState === 'pause' || showControls }">
     <div class="player-container" *ngIf="currentPlayerState === 'pause' || showControls">

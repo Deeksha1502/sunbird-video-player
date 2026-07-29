@@ -6,6 +6,7 @@ import * as _ from 'lodash-es';
 import videojs from 'video.js';
 import 'videojs-contrib-quality-levels';
 import videojshttpsourceselector from 'videojs-http-source-selector';
+import { Subscription } from 'rxjs';
 import { ViewerService } from '../../services/viewer.service';
 import { IAction } from '../../playerInterfaces';
 
@@ -32,6 +33,8 @@ export class VideoPlayerComponent implements AfterViewInit, OnInit, OnDestroy, O
   private unlistenTargetTouchStart: () => void;
   @ViewChild('target', { static: true }) target: ElementRef;
   @ViewChild('controlDiv', { static: true }) controlDiv: ElementRef;
+  @ViewChild('wordHighlightOverlay', { static: true }) wordHighlightOverlay: ElementRef;
+  @ViewChild('wordHighlightLine', { static: true }) wordHighlightLine: ElementRef;
   player: any;
   totalSeekedLength = 0;
   previousTime = 0;
@@ -44,6 +47,35 @@ export class VideoPlayerComponent implements AfterViewInit, OnInit, OnDestroy, O
   setMetaDataConfig = false;
   totalDuration = 0;
   disablePictureInPicture = false;
+  showWordHighlightOverlay = false;
+  private activeWordTrack: any = null;
+  private wordHighlightCues: any[] = [];
+  private wordHighlightCueIndex = 0;
+  private wordHighlightLineWords: string[] = [];
+  private wordHighlightLastCueEnd = 0;
+  private wordHighlightLineStart = 0;
+  // Configurable via config.wordHighlight - see ngOnInit.
+  private wordHighlightGapThresholdSeconds = 0.3;
+  // Independent ceiling on top of the gap-based clearing above - ASR-generated
+  // word-level VTTs can have zero gap between contiguous cues for an entire
+  // monologue, in which case the gap check alone never fires and the line
+  // grows without bound (observed with real word-by-word Urdu captions).
+  // Netflix's per-line character cap (~42) is used as that ceiling - a
+  // reading-speed-based duration cap was tried and reverted: it compares
+  // against elapsed *speech* time, which is inherently slower per-character
+  // than any reasonable reading speed, so it would clear the line almost
+  // immediately after every single word.
+  private wordHighlightMaxLineCharacters = 42;
+  // Tracks every <track> currently attached via player.addRemoteTextTrack(),
+  // keyed by `${kind}|${languageCode}`. video.js's removeRemoteTextTrack()
+  // only works on tracks added this way (not on statically-declared HTML
+  // <track> elements) - so ALL transcript tracks, including the first ones
+  // loaded, go through this same path. That's what makes it possible to
+  // cleanly add/remove tracks later when transcriptsUpdated fires (e.g. a
+  // transcript finishing generation while the player is already mounted),
+  // without duplicating or leaking tracks.
+  private attachedTextTracks = new Map<string, any>();
+  private transcriptsUpdatedSubscription: Subscription;
 
 
   constructor(public viewerService: ViewerService, private renderer2: Renderer2,
@@ -51,6 +83,8 @@ export class VideoPlayerComponent implements AfterViewInit, OnInit, OnDestroy, O
   ngOnInit() {
     this.disablePictureInPicture = _.get(this.config, 'disablePictureInPictureMode', false);
     this.transcripts = this.viewerService.handleTranscriptsData(_.get(this.config, 'transcripts') || []);
+    this.wordHighlightGapThresholdSeconds = _.get(this.config, 'wordHighlight.gapThresholdSeconds', 0.3);
+    this.wordHighlightMaxLineCharacters = _.get(this.config, 'wordHighlight.maxLineCharacters', 42);
   }
   ngAfterViewInit() {
     this.viewerService.getPlayerOptions().then(async (options) => {
@@ -82,6 +116,16 @@ export class VideoPlayerComponent implements AfterViewInit, OnInit, OnDestroy, O
       } as any);
       this.player.videojshttpsourceselector = videojshttpsourceselector;
       this.player.videojshttpsourceselector();
+      // player.addRemoteTextTrack() silently returns undefined if called
+      // before player.tech_ is attached - not guaranteed yet just because the
+      // videojs(...) promise above has resolved. player.ready() is the
+      // documented-safe point to call it.
+      this.player.ready(() => {
+        this.attachTranscriptTracks(this.transcripts);
+      });
+      this.transcriptsUpdatedSubscription = this.viewerService.transcriptsUpdated.subscribe((updated) => {
+        this.syncTranscriptTracks(updated);
+      });
       const markers = this.viewerService.getMarkers();
 
       if (markers && markers.length > 0) {
@@ -194,9 +238,13 @@ export class VideoPlayerComponent implements AfterViewInit, OnInit, OnDestroy, O
       'ratechange'];
 
     this.player.on('fullscreenchange', (data) => {
-      // This code is to show the controldiv in fullscreen mode
+      // This code is to show the controldiv (and the word-highlight overlay,
+      // for the same reason) in fullscreen mode - entering fullscreen only
+      // renders the fullscreen element and its descendants, and both of these
+      // are siblings of <video> rather than descendants of it.
       if (this.player.isFullscreen()) {
         this.target.nativeElement.parentNode.appendChild(this.controlDiv.nativeElement);
+        this.target.nativeElement.parentNode.appendChild(this.wordHighlightOverlay.nativeElement);
       }
       this.viewerService.raiseHeartBeatEvent('FULLSCREEN');
     });
@@ -229,12 +277,16 @@ export class VideoPlayerComponent implements AfterViewInit, OnInit, OnDestroy, O
       this.viewerService.currentlength = this.viewerService.metaData.currentDuration;
       this.totalSpentTime += new Date().getTime() - this.startTime;
       this.startTime = new Date().getTime();
+      this.updateWordHighlightOverlay(this.player.currentTime());
       const remainingTime = Math.floor(this.totalDuration - this.player.currentTime());
       if (remainingTime <= 0) {
             this.viewerService.metaData.currentDuration = 0;
             this.handleVideoControls({ type: 'ended' });
             this.viewerService.playerEvent.emit({ type: 'ended' });
       }
+    });
+    this.player.on('seeked', (data) => {
+      this.rebuildWordHighlightAt(this.player.currentTime());
     });
     this.player.on('subtitleChanged', (event, track) => {
       this.handleEventsForTranscripts(track);
@@ -272,6 +324,96 @@ export class VideoPlayerComponent implements AfterViewInit, OnInit, OnDestroy, O
       }, 10);
     });
   }
+  private trackKey(kind: string, languageCode: string): string {
+    return `${kind}|${languageCode}`;
+  }
+
+  private addTranscriptTrack(kind: 'captions' | 'metadata', trans: any) {
+    const src = kind === 'captions' ? trans.artifactUrl : trans.wordByWordUrl;
+    const sourceSuffix = trans.sourceLanguage ? ' (Original)' : '';
+    const label = kind === 'captions' ? `${trans.language}${sourceSuffix}` : `${trans.language} (word-by-word)`;
+    const isDefault = kind === 'captions' ? !!trans.default : false;
+    const trackEl = this.player.addRemoteTextTrack({
+      kind,
+      src,
+      srclang: trans.languageCode,
+      label,
+      default: isDefault
+    }, false);
+    if (!trackEl) {
+      return;
+    }
+    // The native `default` attribute is only auto-honored by the browser
+    // during a media element's INITIAL text-track processing. Tracks added
+    // imperatively via addRemoteTextTrack() after the player/tech is already
+    // set up (which is every track now, including the first ones - see the
+    // note on attachedTextTracks) don't get that automatic pass, so it has to
+    // be forced here explicitly or the "default" language would never show
+    // without the viewer manually opening the CC menu.
+    if (isDefault && trackEl.track) {
+      trackEl.track.mode = 'showing';
+    }
+    this.attachedTextTracks.set(this.trackKey(kind, trans.languageCode), trackEl.track);
+  }
+
+  private attachTranscriptTracks(transcripts: any[]) {
+    (transcripts || []).forEach((trans) => {
+      this.addTranscriptTrack('captions', trans);
+      if (trans.wordByWordUrl) {
+        this.addTranscriptTrack('metadata', trans);
+      }
+    });
+  }
+
+  private findShowingCaptionsLanguage(): string {
+    const tracks = this.player.textTracks();
+    for (let i = 0; i < tracks.length; i++) {
+      const track = tracks[i];
+      if ((track.kind === 'captions' || track.kind === 'subtitles') && track.mode === 'showing') {
+        return track.language;
+      }
+    }
+    return null;
+  }
+
+  // Reconciles the live player's attached tracks against a freshly-updated
+  // transcripts array (see ViewerService.transcriptsUpdated) - e.g. a
+  // transcript that finishes generating while the preview/player is already
+  // mounted and playing. Removes tracks no longer present, adds new ones,
+  // and re-arms the word-highlight overlay if a wordByWordUrl just became
+  // available for the language currently showing.
+  private syncTranscriptTracks(rawTranscripts: any[]) {
+    const selected = _.get(this.config, 'transcripts') || [];
+    const newTranscripts = this.viewerService.handleTranscriptsData(selected);
+    const desiredKeys = new Set<string>();
+    (newTranscripts || []).forEach((trans) => {
+      desiredKeys.add(this.trackKey('captions', trans.languageCode));
+      if (trans.wordByWordUrl) {
+        desiredKeys.add(this.trackKey('metadata', trans.languageCode));
+      }
+    });
+    Array.from(this.attachedTextTracks.keys()).forEach((key) => {
+      if (!desiredKeys.has(key)) {
+        const track = this.attachedTextTracks.get(key);
+        this.player.removeRemoteTextTrack(track);
+        this.attachedTextTracks.delete(key);
+      }
+    });
+    const showingLanguage = this.findShowingCaptionsLanguage();
+    (newTranscripts || []).forEach((trans) => {
+      if (!this.attachedTextTracks.has(this.trackKey('captions', trans.languageCode))) {
+        this.addTranscriptTrack('captions', trans);
+      }
+      if (trans.wordByWordUrl && !this.attachedTextTracks.has(this.trackKey('metadata', trans.languageCode))) {
+        this.addTranscriptTrack('metadata', trans);
+        if (!this.activeWordTrack && showingLanguage === trans.languageCode) {
+          this.activateWordHighlightTrack(trans.languageCode);
+        }
+      }
+    });
+    this.transcripts = newTranscripts;
+  }
+
   handleEventsForTranscripts(track) {
     let telemetryObject;
     if (!_.isEmpty(track)) {
@@ -287,6 +429,7 @@ export class VideoPlayerComponent implements AfterViewInit, OnInit, OnDestroy, O
       if (_.last(this.viewerService.metaData.transcripts) !== track.languageCode) {
         this.viewerService.metaData.transcripts.push(track.languageCode);
       }
+      this.activateWordHighlightTrack(track.languageCode);
     } else {
       telemetryObject = {
         type: 'TRANSCRIPT_LANGUAGE_OFF',
@@ -295,8 +438,180 @@ export class VideoPlayerComponent implements AfterViewInit, OnInit, OnDestroy, O
         }
       };
       this.viewerService.metaData.transcripts.push('off');
+      this.deactivateWordHighlightTrack();
     }
     this.viewerService.raiseHeartBeatEvent(telemetryObject.type, telemetryObject.extraValues);
+  }
+
+  // Finds a same-language word-level track and arms it as the active source
+  // for the overlay. This never hides native captions by itself - visibility
+  // is entirely decided by updateWordHighlightOverlay/rebuildWordHighlightAt
+  // finding real words to show. That means a wordByWordUrl that's missing,
+  // 404s, is empty/malformed, or simply doesn't cover part of the video needs
+  // no special-case detection: native captions just keep showing whenever the
+  // overlay has nothing, with no timers or video.js-internal load/error
+  // events involved.
+  private activateWordHighlightTrack(languageCode: string) {
+    const textTracks = this.player.textTracks();
+    let wordTrack = null;
+    for (let i = 0; i < textTracks.length; i++) {
+      const track = textTracks[i];
+      if (track.kind === 'metadata' && track.language &&
+        track.language.toLowerCase() === languageCode.toLowerCase()) {
+        wordTrack = track;
+        break;
+      }
+    }
+    if (this.activeWordTrack && this.activeWordTrack !== wordTrack) {
+      this.activeWordTrack.mode = 'disabled';
+    }
+    this.activeWordTrack = wordTrack;
+    this.resetWordHighlightState();
+    if (!wordTrack) {
+      return;
+    }
+    wordTrack.mode = 'hidden';
+    // In case cues are already loaded (e.g. re-enabling a track the user had
+    // on before) and playback is already mid-video, position the overlay
+    // immediately instead of waiting for the next timeupdate tick to sweep
+    // forward from the start of the cue list.
+    this.rebuildWordHighlightAt(this.player.currentTime());
+  }
+
+  private deactivateWordHighlightTrack() {
+    if (this.activeWordTrack) {
+      this.activeWordTrack.mode = 'disabled';
+    }
+    this.activeWordTrack = null;
+    this.resetWordHighlightState();
+    this.renderWordHighlightLine();
+  }
+
+  private resetWordHighlightState() {
+    this.wordHighlightCues = [];
+    this.wordHighlightCueIndex = 0;
+    this.wordHighlightLineWords = [];
+    this.wordHighlightLastCueEnd = 0;
+    this.wordHighlightLineStart = 0;
+    this.setWordHighlightOverlayVisible(false);
+  }
+
+  // video.js does not keep our Angular-rendered <video class="video-js"> tag
+  // as its final DOM root - it builds its own tech/wrapper structure - so an
+  // Angular class binding on that original element does not reliably reach
+  // the same ancestor as the dynamically-created .vjs-text-track-display.
+  // player.addClass/removeClass operate on the tech's actual live root
+  // element, which is what the ::ng-deep hide rule needs to match against.
+  private setWordHighlightOverlayVisible(visible: boolean) {
+    if (this.showWordHighlightOverlay === visible) { return; }
+    this.showWordHighlightOverlay = visible;
+    if (!this.player) { return; }
+    if (visible) {
+      this.player.addClass('word-highlight-active');
+    } else {
+      this.player.removeClass('word-highlight-active');
+    }
+  }
+
+  private ensureWordHighlightCuesLoaded() {
+    if (!this.activeWordTrack || this.wordHighlightCues.length > 0 ||
+      !this.activeWordTrack.cues || this.activeWordTrack.cues.length === 0) {
+      return;
+    }
+    this.wordHighlightCues = Array.from(this.activeWordTrack.cues as any).sort((a: any, b: any) => a.startTime - b.startTime);
+  }
+
+  private updateWordHighlightOverlay(currentTime: number) {
+    if (!this.activeWordTrack) { return; }
+    this.ensureWordHighlightCuesLoaded();
+    let changed = false;
+    while (this.wordHighlightCueIndex < this.wordHighlightCues.length &&
+      this.wordHighlightCues[this.wordHighlightCueIndex].startTime <= currentTime) {
+      const cue = this.wordHighlightCues[this.wordHighlightCueIndex];
+      const gapBroken = cue.startTime - this.wordHighlightLastCueEnd > this.wordHighlightGapThresholdSeconds;
+      const prospectiveLength = this.wordHighlightLineWords.length === 0
+        ? cue.text.length
+        : this.wordHighlightLineWords.join(' ').length + 1 + cue.text.length;
+      const tooManyChars = this.wordHighlightLineWords.length > 0 &&
+        prospectiveLength > this.wordHighlightMaxLineCharacters;
+      if (gapBroken || tooManyChars) {
+        this.wordHighlightLineWords = [];
+      }
+      if (this.wordHighlightLineWords.length === 0) {
+        this.wordHighlightLineStart = cue.startTime;
+      }
+      this.wordHighlightLastCueEnd = cue.endTime;
+      this.wordHighlightLineWords.push(cue.text);
+      this.wordHighlightCueIndex += 1;
+      changed = true;
+    }
+    // No new cue consumed this tick, but the last known word ended long
+    // enough ago (natural sentence gap, end of this VTT's coverage, or a VTT
+    // that never covered this part of the video at all) - clear the stale
+    // line so native captions take back over instead of freezing forever.
+    if (!changed && this.wordHighlightLineWords.length > 0 &&
+      (currentTime - this.wordHighlightLastCueEnd) > this.wordHighlightGapThresholdSeconds) {
+      this.wordHighlightLineWords = [];
+      changed = true;
+    }
+    if (changed) {
+      this.renderWordHighlightLine();
+    }
+    this.setWordHighlightOverlayVisible(this.wordHighlightLineWords.length > 0);
+  }
+
+  private rebuildWordHighlightAt(currentTime: number) {
+    if (!this.activeWordTrack) { return; }
+    this.ensureWordHighlightCuesLoaded();
+    this.wordHighlightCueIndex = 0;
+    while (this.wordHighlightCueIndex < this.wordHighlightCues.length &&
+      this.wordHighlightCues[this.wordHighlightCueIndex].startTime <= currentTime) {
+      this.wordHighlightCueIndex += 1;
+    }
+    this.wordHighlightLineWords = [];
+    this.wordHighlightLastCueEnd = 0;
+    this.wordHighlightLineStart = 0;
+    let start = this.wordHighlightCueIndex - 1;
+    let charCount = start >= 0 ? this.wordHighlightCues[start].text.length : 0;
+    while (start >= 0) {
+      const gapBefore = start > 0
+        ? this.wordHighlightCues[start].startTime - this.wordHighlightCues[start - 1].endTime
+        : Infinity;
+      const prospectiveCharCount = start > 0 ? charCount + 1 + this.wordHighlightCues[start - 1].text.length : Infinity;
+      const tooManyChars = start > 0 && prospectiveCharCount > this.wordHighlightMaxLineCharacters;
+      if (gapBefore > this.wordHighlightGapThresholdSeconds || tooManyChars) { break; }
+      charCount = prospectiveCharCount;
+      start -= 1;
+    }
+    // Only treat the reconstructed line as still "live" if its last word's
+    // cue hasn't already ended beyond the gap threshold relative to
+    // currentTime - keeps seek behavior consistent with normal playback
+    // rather than showing a stale line the moment cues run out.
+    const lastIndex = this.wordHighlightCueIndex - 1;
+    if (lastIndex >= 0 && (currentTime - this.wordHighlightCues[lastIndex].endTime) <= this.wordHighlightGapThresholdSeconds) {
+      this.wordHighlightLineStart = this.wordHighlightCues[Math.max(start, 0)].startTime;
+      for (let i = Math.max(start, 0); i <= lastIndex; i++) {
+        this.wordHighlightLineWords.push(this.wordHighlightCues[i].text);
+        this.wordHighlightLastCueEnd = this.wordHighlightCues[i].endTime;
+      }
+    }
+    this.renderWordHighlightLine();
+    this.setWordHighlightOverlayVisible(this.wordHighlightLineWords.length > 0);
+  }
+
+  private renderWordHighlightLine() {
+    if (!this.wordHighlightLine) { return; }
+    this.wordHighlightLine.nativeElement.innerHTML = this.wordHighlightLineWords
+      .map((word, i) => i === this.wordHighlightLineWords.length - 1
+        ? `<span class="word-highlight-word--current">${this.escapeHtml(word)}</span>`
+        : this.escapeHtml(word))
+      .join(' ');
+  }
+
+  private escapeHtml(text: string): string {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
   }
 
   toggleForwardRewindButton() {
@@ -444,6 +759,9 @@ export class VideoPlayerComponent implements AfterViewInit, OnInit, OnDestroy, O
   }
 
   ngOnDestroy() {
+    if (this.transcriptsUpdatedSubscription) {
+      this.transcriptsUpdatedSubscription.unsubscribe();
+    }
     if (this.player) {
       this.player.dispose();
     }

@@ -60,6 +60,15 @@ sideMenu?: {
     showReplay?: boolean;
     showExit?: boolean;
 };
+wordHighlight?: {
+    // Below this gap (seconds) between consecutive word cues, the overlay
+    // keeps accumulating them onto the same line. Default 0.3.
+    gapThresholdSeconds?: number;
+    // Max characters per accumulated line (Netflix's per-line cap is ~42).
+    // Guards against word-level VTTs with no pauses at all, where the gap
+    // check alone would never fire. Default 42.
+    maxLineCharacters?: number;
+};
 [propName: string]: any;
 }
 
@@ -74,6 +83,10 @@ export interface Transcript {
     identifier: string;
     artifactUrl: string;
     languageCode: string;
+    wordByWordUrl?: string;
+    // Marks the original/source-language transcript (as opposed to a
+    // translated one) - surfaced as "(Original)" in the captions menu label.
+    sourceLanguage?: boolean;
   }
 export interface Transcripts extends Array <Transcript> {}
 
