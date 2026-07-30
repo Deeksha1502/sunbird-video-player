@@ -53,6 +53,10 @@ export class ViewerService {
   public transcripts: Transcripts;
   public playBitStartTime = 0;
   public playBitEndTime = 0;
+  // Set alongside isAvailableLocally in initialize() - reused by
+  // updateTranscripts() so a transcript payload pushed in later (hot-reload)
+  // gets the same offline basePath prefixing as the initial one.
+  private localBasePath: string;
   constructor(private videoPlayerService: SunbirdVideoPlayerService,
               private utilService: UtilService,
               private http: HttpClient,
@@ -89,6 +93,7 @@ export class ViewerService {
     this.endPageSeen = false;
     if (this.isAvailableLocally) {
       const basePath = (metadata.streamingUrl) ? (metadata.streamingUrl) : (metadata.basePath || metadata.baseDir);
+      this.localBasePath = basePath;
       this.streamingUrl = `${basePath}/${metadata.artifactUrl}`;
       this.mimeType = metadata.mimeType;
       // Transcript/caption files ship inside the same offline .ecar bundle as
@@ -96,12 +101,16 @@ export class ViewerService {
       // metadata.artifactUrl above - without this they'd resolve against the
       // page origin instead of the local content basePath and fail to load
       // when playing offline (e.g. downloaded content in the mobile app).
-      this.transcripts = this.transcripts.map((trans) => ({
-        ...trans,
-        artifactUrl: trans.artifactUrl ? `${basePath}/${trans.artifactUrl}` : trans.artifactUrl,
-        wordByWordUrl: trans.wordByWordUrl ? `${basePath}/${trans.wordByWordUrl}` : trans.wordByWordUrl
-      }));
+      this.transcripts = this.prefixTranscriptUrls(this.transcripts, basePath);
     }
+  }
+
+  private prefixTranscriptUrls(transcripts: Transcripts, basePath: string): Transcripts {
+    return transcripts.map((trans) => ({
+      ...trans,
+      artifactUrl: trans.artifactUrl ? `${basePath}/${trans.artifactUrl}` : trans.artifactUrl,
+      wordByWordUrl: trans.wordByWordUrl ? `${basePath}/${trans.wordByWordUrl}` : trans.wordByWordUrl
+    }));
   }
   handleTranscriptsData(selectedTranscripts) {
     this.metaData.transcripts = selectedTranscripts;
@@ -125,7 +134,11 @@ export class ViewerService {
   }
 
   updateTranscripts(transcripts: Transcripts) {
-    this.transcripts = transcripts || [];
+    let newTranscripts = transcripts || [];
+    if (this.isAvailableLocally && this.localBasePath) {
+      newTranscripts = this.prefixTranscriptUrls(newTranscripts, this.localBasePath);
+    }
+    this.transcripts = newTranscripts;
     this.transcriptsUpdated.emit(this.transcripts);
   }
   async getPlayerOptions() {

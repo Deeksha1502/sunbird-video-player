@@ -53,7 +53,6 @@ export class VideoPlayerComponent implements AfterViewInit, OnInit, OnDestroy, O
   private wordHighlightCueIndex = 0;
   private wordHighlightLineWords: string[] = [];
   private wordHighlightLastCueEnd = 0;
-  private wordHighlightLineStart = 0;
   // Configurable via config.wordHighlight - see ngOnInit.
   private wordHighlightGapThresholdSeconds = 0.3;
   // Independent ceiling on top of the gap-based clearing above - ASR-generated
@@ -492,7 +491,6 @@ export class VideoPlayerComponent implements AfterViewInit, OnInit, OnDestroy, O
     this.wordHighlightCueIndex = 0;
     this.wordHighlightLineWords = [];
     this.wordHighlightLastCueEnd = 0;
-    this.wordHighlightLineStart = 0;
     this.setWordHighlightOverlayVisible(false);
   }
 
@@ -537,9 +535,6 @@ export class VideoPlayerComponent implements AfterViewInit, OnInit, OnDestroy, O
       if (gapBroken || tooManyChars) {
         this.wordHighlightLineWords = [];
       }
-      if (this.wordHighlightLineWords.length === 0) {
-        this.wordHighlightLineStart = cue.startTime;
-      }
       this.wordHighlightLastCueEnd = cue.endTime;
       this.wordHighlightLineWords.push(cue.text);
       this.wordHighlightCueIndex += 1;
@@ -570,7 +565,6 @@ export class VideoPlayerComponent implements AfterViewInit, OnInit, OnDestroy, O
     }
     this.wordHighlightLineWords = [];
     this.wordHighlightLastCueEnd = 0;
-    this.wordHighlightLineStart = 0;
     let start = this.wordHighlightCueIndex - 1;
     let charCount = start >= 0 ? this.wordHighlightCues[start].text.length : 0;
     while (start >= 0) {
@@ -589,7 +583,6 @@ export class VideoPlayerComponent implements AfterViewInit, OnInit, OnDestroy, O
     // rather than showing a stale line the moment cues run out.
     const lastIndex = this.wordHighlightCueIndex - 1;
     if (lastIndex >= 0 && (currentTime - this.wordHighlightCues[lastIndex].endTime) <= this.wordHighlightGapThresholdSeconds) {
-      this.wordHighlightLineStart = this.wordHighlightCues[Math.max(start, 0)].startTime;
       for (let i = Math.max(start, 0); i <= lastIndex; i++) {
         this.wordHighlightLineWords.push(this.wordHighlightCues[i].text);
         this.wordHighlightLastCueEnd = this.wordHighlightCues[i].endTime;
