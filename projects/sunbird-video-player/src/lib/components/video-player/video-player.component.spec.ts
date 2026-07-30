@@ -214,6 +214,9 @@ describe('VideoPlayerComponent', () => {
       currentTime: jasmine.createSpy('currentTime'),
       isFullscreen: jasmine.createSpy('isFullscreen'),
       duration: jasmine.createSpy('duration').and.returnValue(1290),
+      textTracks: jasmine.createSpy('textTracks').and.returnValue([]),
+      addClass: jasmine.createSpy('addClass'),
+      removeClass: jasmine.createSpy('removeClass'),
       on: jasmine.createSpy('on').and.callFake((event, callback) => {
         expect(typeof callback).toBe('function');
         callback('pause', 'successResponse');
@@ -299,6 +302,9 @@ describe('VideoPlayerComponent', () => {
     component.viewerService.metaData = { transcripts: ['en'] };
     component.player = {
        currentTime: jasmine.createSpy('currentTime').and.returnValue(2.230),
+       textTracks: jasmine.createSpy('textTracks').and.returnValue([]),
+       addClass: jasmine.createSpy('addClass'),
+       removeClass: jasmine.createSpy('removeClass'),
      };
     const track =  { artifactUrl: 'https://cdn.jsdelivr.net/gh/tombyrer/videojs-transcript-click@1.0/demo/captions.sv.vtt',
       languageCode: 'bn' };
@@ -334,5 +340,151 @@ describe('VideoPlayerComponent', () => {
     component.ngOnChanges(mockData.changesForBlank);
     expect(component.pause).not.toHaveBeenCalled();
     expect(component.play).not.toHaveBeenCalled();
+  });
+
+  it('should attach captions and metadata tracks for transcripts with wordByWordUrl', () => {
+    const captionsTrack = { track: { mode: 'disabled' } };
+    const metadataTrack = { track: { mode: 'disabled' } };
+    component.player = {
+      addRemoteTextTrack: jasmine.createSpy('addRemoteTextTrack').and.callFake((opts) => {
+        return opts.kind === 'captions' ? captionsTrack : metadataTrack;
+      })
+    };
+    const transcripts = [{ language: 'English', languageCode: 'en', artifactUrl: 'en.vtt', wordByWordUrl: 'en-word.vtt' }];
+    (component as any).attachTranscriptTracks(transcripts);
+    expect(component.player.addRemoteTextTrack).toHaveBeenCalledTimes(2);
+    expect((component as any).attachedTextTracks.get('captions|en')).toBe(captionsTrack.track);
+    expect((component as any).attachedTextTracks.get('metadata|en')).toBe(metadataTrack.track);
+  });
+
+  it('should not attach a metadata track when wordByWordUrl is absent', () => {
+    const captionsTrack = { track: { mode: 'disabled' } };
+    component.player = {
+      addRemoteTextTrack: jasmine.createSpy('addRemoteTextTrack').and.returnValue(captionsTrack)
+    };
+    (component as any).attachTranscriptTracks([{ language: 'English', languageCode: 'en', artifactUrl: 'en.vtt' }]);
+    expect(component.player.addRemoteTextTrack).toHaveBeenCalledTimes(1);
+    expect((component as any).attachedTextTracks.has('metadata|en')).toBeFalsy();
+  });
+
+  it('should mark the default transcript track as showing', () => {
+    const captionsTrack = { track: { mode: 'disabled' } };
+    component.player = {
+      addRemoteTextTrack: jasmine.createSpy('addRemoteTextTrack').and.returnValue(captionsTrack)
+    };
+    (component as any).addTranscriptTrack('captions', { language: 'English', languageCode: 'en', artifactUrl: 'en.vtt', default: true });
+    expect(captionsTrack.track.mode).toBe('showing');
+  });
+
+  it('should not throw when addRemoteTextTrack returns undefined because the tech is not ready yet', () => {
+    component.player = {
+      addRemoteTextTrack: jasmine.createSpy('addRemoteTextTrack').and.returnValue(undefined)
+    };
+    expect(() => (component as any).addTranscriptTrack('captions', { language: 'English', languageCode: 'en', artifactUrl: 'en.vtt' }))
+      .not.toThrow();
+    expect((component as any).attachedTextTracks.size).toBe(0);
+  });
+
+  it('should remove stale tracks and add new ones when transcripts are synced', () => {
+    const oldTrack = { mode: 'showing' };
+    const newCaptionsTrack = { track: { mode: 'disabled' } };
+    (component as any).attachedTextTracks.set('captions|fr', oldTrack);
+    component.config = { transcripts: [] };
+    spyOn(component.viewerService, 'handleTranscriptsData').and.returnValue([
+      { language: 'English', languageCode: 'en', artifactUrl: 'en.vtt', identifier: 'en-id' }
+    ]);
+    component.player = {
+      removeRemoteTextTrack: jasmine.createSpy('removeRemoteTextTrack'),
+      addRemoteTextTrack: jasmine.createSpy('addRemoteTextTrack').and.returnValue(newCaptionsTrack),
+      textTracks: jasmine.createSpy('textTracks').and.returnValue([])
+    };
+    (component as any).syncTranscriptTracks([]);
+    expect(component.player.removeRemoteTextTrack).toHaveBeenCalledWith(oldTrack);
+    expect((component as any).attachedTextTracks.has('captions|fr')).toBeFalsy();
+    expect((component as any).attachedTextTracks.get('captions|en')).toBe(newCaptionsTrack.track);
+  });
+
+  it('should activate the matching metadata track for word-highlight overlay', () => {
+    const wordTrack: any = { kind: 'metadata', language: 'en', mode: 'disabled', cues: [] };
+    component.player = {
+      textTracks: jasmine.createSpy('textTracks').and.returnValue([wordTrack]),
+      currentTime: jasmine.createSpy('currentTime').and.returnValue(0),
+      addClass: jasmine.createSpy('addClass'),
+      removeClass: jasmine.createSpy('removeClass')
+    };
+    (component as any).activateWordHighlightTrack('en');
+    expect((component as any).activeWordTrack).toBe(wordTrack);
+    expect(wordTrack.mode).toBe('hidden');
+  });
+
+  it('should deactivate the active word-highlight track', () => {
+    const wordTrack: any = { mode: 'hidden' };
+    (component as any).activeWordTrack = wordTrack;
+    (component as any).showWordHighlightOverlay = true;
+    component.player = {
+      removeClass: jasmine.createSpy('removeClass'),
+      addClass: jasmine.createSpy('addClass')
+    };
+    (component as any).deactivateWordHighlightTrack();
+    expect(wordTrack.mode).toBe('disabled');
+    expect((component as any).activeWordTrack).toBeNull();
+    expect(component.player.removeClass).toHaveBeenCalledWith('word-highlight-active');
+  });
+
+  it('should accumulate consecutive word cues within the gap and character thresholds', () => {
+    const cues = [
+      { startTime: 0, endTime: 0.2, text: 'Hello' },
+      { startTime: 0.25, endTime: 0.5, text: 'world' }
+    ];
+    (component as any).activeWordTrack = { cues };
+    component.player = { addClass: jasmine.createSpy('addClass'), removeClass: jasmine.createSpy('removeClass') };
+    (component as any).updateWordHighlightOverlay(0.5);
+    expect((component as any).wordHighlightLineWords).toEqual(['Hello', 'world']);
+  });
+
+  it('should clear the accumulated line when the gap between cues exceeds the threshold', () => {
+    const cues = [
+      { startTime: 0, endTime: 0.2, text: 'Hello' },
+      { startTime: 2, endTime: 2.3, text: 'world' }
+    ];
+    (component as any).activeWordTrack = { cues };
+    component.player = { addClass: jasmine.createSpy('addClass'), removeClass: jasmine.createSpy('removeClass') };
+    (component as any).updateWordHighlightOverlay(2.3);
+    expect((component as any).wordHighlightLineWords).toEqual(['world']);
+  });
+
+  it('should clear the accumulated line when the character cap is exceeded', () => {
+    (component as any).wordHighlightMaxLineCharacters = 10;
+    const cues = [
+      { startTime: 0, endTime: 0.1, text: 'Hello' },
+      { startTime: 0.15, endTime: 0.3, text: 'World' },
+      { startTime: 0.35, endTime: 0.5, text: 'Again' }
+    ];
+    (component as any).activeWordTrack = { cues };
+    component.player = { addClass: jasmine.createSpy('addClass'), removeClass: jasmine.createSpy('removeClass') };
+    (component as any).updateWordHighlightOverlay(0.5);
+    expect((component as any).wordHighlightLineWords).toEqual(['Again']);
+  });
+
+  it('should reconstruct the current line backward from currentTime on seek', () => {
+    const cues = [
+      { startTime: 0, endTime: 0.2, text: 'Hello' },
+      { startTime: 0.25, endTime: 0.5, text: 'world' },
+      { startTime: 3, endTime: 3.2, text: 'later' }
+    ];
+    (component as any).activeWordTrack = { cues };
+    component.player = { addClass: jasmine.createSpy('addClass'), removeClass: jasmine.createSpy('removeClass') };
+    (component as any).rebuildWordHighlightAt(0.5);
+    expect((component as any).wordHighlightLineWords).toEqual(['Hello', 'world']);
+  });
+
+  it('should show nothing after seeking past the last cue beyond the gap threshold', () => {
+    const cues = [
+      { startTime: 0, endTime: 0.2, text: 'Hello' }
+    ];
+    (component as any).activeWordTrack = { cues };
+    component.player = { addClass: jasmine.createSpy('addClass'), removeClass: jasmine.createSpy('removeClass') };
+    (component as any).rebuildWordHighlightAt(5);
+    expect((component as any).wordHighlightLineWords).toEqual([]);
   });
 });
