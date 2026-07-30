@@ -251,8 +251,12 @@ div[data-marker-key] {
     text-align: center;
   }
 
-  .word-highlight-word--current {
-    color: #ffd400;
+  // renderWordHighlightLine() injects this span via raw innerHTML rather than
+  // Angular's renderer/template, so it never gets the scoped _ngcontent
+  // attribute emulated encapsulation relies on - ::ng-deep is required here
+  // for the same reason it's needed for .vjs-text-track-display above.
+  ::ng-deep .word-highlight-word--current {
+    color: #fff;
     font-weight: 700;
   }
 }

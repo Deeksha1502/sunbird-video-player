@@ -594,8 +594,14 @@ export class VideoPlayerComponent implements AfterViewInit, OnInit, OnDestroy, O
 
   private renderWordHighlightLine() {
     if (!this.wordHighlightLine) { return; }
+    // Only bold the last word when there are other words on the same line to
+    // contrast it against - for sentence-level VTTs (no real word-level
+    // timing) each line is just a single whole-sentence cue, so marking that
+    // sole item "current" would bold the entire sentence instead of
+    // highlighting anything meaningful.
+    const highlightLast = this.wordHighlightLineWords.length > 1;
     this.wordHighlightLine.nativeElement.innerHTML = this.wordHighlightLineWords
-      .map((word, i) => i === this.wordHighlightLineWords.length - 1
+      .map((word, i) => (highlightLast && i === this.wordHighlightLineWords.length - 1)
         ? `<span class="word-highlight-word--current">${this.escapeHtml(word)}</span>`
         : this.escapeHtml(word))
       .join(' ');
