@@ -420,6 +420,7 @@ describe('VideoPlayerComponent', () => {
   it('should deactivate the active word-highlight track', () => {
     const wordTrack: any = { mode: 'hidden' };
     (component as any).activeWordTrack = wordTrack;
+    (component as any).activeWordTrackOwned = true;
     (component as any).showWordHighlightOverlay = true;
     component.player = {
       removeClass: jasmine.createSpy('removeClass'),
@@ -429,6 +430,34 @@ describe('VideoPlayerComponent', () => {
     expect(wordTrack.mode).toBe('disabled');
     expect((component as any).activeWordTrack).toBeNull();
     expect(component.player.removeClass).toHaveBeenCalledWith('word-highlight-active');
+  });
+
+  it('should reuse the same-language captions track when no distinct metadata track exists', () => {
+    const captionsTrack: any = { kind: 'captions', language: 'en', mode: 'showing', cues: [] };
+    component.player = {
+      textTracks: jasmine.createSpy('textTracks').and.returnValue([captionsTrack]),
+      currentTime: jasmine.createSpy('currentTime').and.returnValue(0),
+      addClass: jasmine.createSpy('addClass'),
+      removeClass: jasmine.createSpy('removeClass')
+    };
+    (component as any).activateWordHighlightTrack('en');
+    expect((component as any).activeWordTrack).toBe(captionsTrack);
+    expect((component as any).activeWordTrackOwned).toBeFalsy();
+    // Mode must be left alone - native captions rendering depends on it
+    // staying 'showing', unlike a dedicated metadata track we own.
+    expect(captionsTrack.mode).toBe('showing');
+  });
+
+  it('should not fetch a distinct metadata track when wordByWordUrl equals artifactUrl', () => {
+    const captionsTrack = { track: { mode: 'disabled' } };
+    component.player = {
+      addRemoteTextTrack: jasmine.createSpy('addRemoteTextTrack').and.returnValue(captionsTrack)
+    };
+    (component as any).attachTranscriptTracks([
+      { language: 'English', languageCode: 'en', artifactUrl: 'en.vtt', wordByWordUrl: 'en.vtt' }
+    ]);
+    expect(component.player.addRemoteTextTrack).toHaveBeenCalledTimes(1);
+    expect((component as any).attachedTextTracks.has('metadata|en')).toBeFalsy();
   });
 
   it('should accumulate consecutive word cues within the gap and character thresholds', () => {

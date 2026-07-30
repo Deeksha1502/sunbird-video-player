@@ -49,6 +49,11 @@ export class VideoPlayerComponent implements AfterViewInit, OnInit, OnDestroy, O
   disablePictureInPicture = false;
   showWordHighlightOverlay = false;
   private activeWordTrack: any = null;
+  // True when activeWordTrack is a dedicated metadata track we control the
+  // mode of; false when it's a shared captions track (reused because
+  // wordByWordUrl equals artifactUrl) whose mode must be left alone since
+  // native captions rendering depends on it staying 'showing'.
+  private activeWordTrackOwned = false;
   private wordHighlightCues: any[] = [];
   private wordHighlightCueIndex = 0;
   private wordHighlightLineWords: string[] = [];
@@ -355,10 +360,18 @@ export class VideoPlayerComponent implements AfterViewInit, OnInit, OnDestroy, O
     this.attachedTextTracks.set(this.trackKey(kind, trans.languageCode), trackEl.track);
   }
 
+  // A distinct metadata track (and its own fetch) is only needed when
+  // wordByWordUrl genuinely points at a different file than the captions
+  // track - when they're the same URL, the captions track's own cues are
+  // reused for the overlay instead of fetching an identical copy twice.
+  private needsDistinctWordTrack(trans: any): boolean {
+    return !!trans.wordByWordUrl && trans.wordByWordUrl !== trans.artifactUrl;
+  }
+
   private attachTranscriptTracks(transcripts: any[]) {
     (transcripts || []).forEach((trans) => {
       this.addTranscriptTrack('captions', trans);
-      if (trans.wordByWordUrl) {
+      if (this.needsDistinctWordTrack(trans)) {
         this.addTranscriptTrack('metadata', trans);
       }
     });
@@ -387,7 +400,7 @@ export class VideoPlayerComponent implements AfterViewInit, OnInit, OnDestroy, O
     const desiredKeys = new Set<string>();
     (newTranscripts || []).forEach((trans) => {
       desiredKeys.add(this.trackKey('captions', trans.languageCode));
-      if (trans.wordByWordUrl) {
+      if (this.needsDistinctWordTrack(trans)) {
         desiredKeys.add(this.trackKey('metadata', trans.languageCode));
       }
     });
@@ -403,11 +416,11 @@ export class VideoPlayerComponent implements AfterViewInit, OnInit, OnDestroy, O
       if (!this.attachedTextTracks.has(this.trackKey('captions', trans.languageCode))) {
         this.addTranscriptTrack('captions', trans);
       }
-      if (trans.wordByWordUrl && !this.attachedTextTracks.has(this.trackKey('metadata', trans.languageCode))) {
+      if (this.needsDistinctWordTrack(trans) && !this.attachedTextTracks.has(this.trackKey('metadata', trans.languageCode))) {
         this.addTranscriptTrack('metadata', trans);
-        if (!this.activeWordTrack && showingLanguage === trans.languageCode) {
-          this.activateWordHighlightTrack(trans.languageCode);
-        }
+      }
+      if (trans.wordByWordUrl && !this.activeWordTrack && showingLanguage === trans.languageCode) {
+        this.activateWordHighlightTrack(trans.languageCode);
       }
     });
     this.transcripts = newTranscripts;
@@ -450,26 +463,45 @@ export class VideoPlayerComponent implements AfterViewInit, OnInit, OnDestroy, O
   // no special-case detection: native captions just keep showing whenever the
   // overlay has nothing, with no timers or video.js-internal load/error
   // events involved.
-  private activateWordHighlightTrack(languageCode: string) {
+  // Prefers a dedicated metadata track for the language; falls back to the
+  // same-language captions track's own cues when no distinct wordByWordUrl
+  // was ever fetched (the common case - wordByWordUrl equals artifactUrl).
+  private findWordHighlightSource(languageCode: string): { track: any; owned: boolean } | null {
     const textTracks = this.player.textTracks();
-    let wordTrack = null;
+    let captionsTrack = null;
     for (let i = 0; i < textTracks.length; i++) {
       const track = textTracks[i];
-      if (track.kind === 'metadata' && track.language &&
-        track.language.toLowerCase() === languageCode.toLowerCase()) {
-        wordTrack = track;
-        break;
+      if (!track.language || track.language.toLowerCase() !== languageCode.toLowerCase()) {
+        continue;
+      }
+      if (track.kind === 'metadata') {
+        return { track, owned: true };
+      }
+      if (track.kind === 'captions' || track.kind === 'subtitles') {
+        captionsTrack = track;
       }
     }
-    if (this.activeWordTrack && this.activeWordTrack !== wordTrack) {
+    return captionsTrack ? { track: captionsTrack, owned: false } : null;
+  }
+
+  private activateWordHighlightTrack(languageCode: string) {
+    const source = this.findWordHighlightSource(languageCode);
+    const wordTrack = source ? source.track : null;
+    if (this.activeWordTrack && this.activeWordTrack !== wordTrack && this.activeWordTrackOwned) {
       this.activeWordTrack.mode = 'disabled';
     }
     this.activeWordTrack = wordTrack;
+    this.activeWordTrackOwned = !!source && source.owned;
     this.resetWordHighlightState();
     if (!wordTrack) {
       return;
     }
-    wordTrack.mode = 'hidden';
+    // Only take ownership of the track's mode when it's a dedicated metadata
+    // track nothing else depends on - when reusing the captions track, its
+    // mode must stay whatever native caption rendering already set it to.
+    if (this.activeWordTrackOwned) {
+      wordTrack.mode = 'hidden';
+    }
     // In case cues are already loaded (e.g. re-enabling a track the user had
     // on before) and playback is already mid-video, position the overlay
     // immediately instead of waiting for the next timeupdate tick to sweep
@@ -478,10 +510,11 @@ export class VideoPlayerComponent implements AfterViewInit, OnInit, OnDestroy, O
   }
 
   private deactivateWordHighlightTrack() {
-    if (this.activeWordTrack) {
+    if (this.activeWordTrack && this.activeWordTrackOwned) {
       this.activeWordTrack.mode = 'disabled';
     }
     this.activeWordTrack = null;
+    this.activeWordTrackOwned = false;
     this.resetWordHighlightState();
     this.renderWordHighlightLine();
   }
@@ -594,23 +627,7 @@ export class VideoPlayerComponent implements AfterViewInit, OnInit, OnDestroy, O
 
   private renderWordHighlightLine() {
     if (!this.wordHighlightLine) { return; }
-    // Only bold the last word when there are other words on the same line to
-    // contrast it against - for sentence-level VTTs (no real word-level
-    // timing) each line is just a single whole-sentence cue, so marking that
-    // sole item "current" would bold the entire sentence instead of
-    // highlighting anything meaningful.
-    const highlightLast = this.wordHighlightLineWords.length > 1;
-    this.wordHighlightLine.nativeElement.innerHTML = this.wordHighlightLineWords
-      .map((word, i) => (highlightLast && i === this.wordHighlightLineWords.length - 1)
-        ? `<span class="word-highlight-word--current">${this.escapeHtml(word)}</span>`
-        : this.escapeHtml(word))
-      .join(' ');
-  }
-
-  private escapeHtml(text: string): string {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
+    this.wordHighlightLine.nativeElement.textContent = this.wordHighlightLineWords.join(' ');
   }
 
   toggleForwardRewindButton() {
