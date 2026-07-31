@@ -342,4 +342,40 @@ describe('SunbirdVideoPlayerComponent', () => {
     component.ngOnChanges(changes);
     expect(component.ngOnInit).not.toHaveBeenCalled();
   });
+
+  it('should push new transcripts and keep playerConfig as an object on a subsequent update (object path)', () => {
+    component.isInitialized = true;
+    component.ngOnInit();
+    spyOn(component.viewerService, 'updateTranscripts');
+    const updatedConfig = {
+      ...mockData.playerConfig,
+      metadata: { ...mockData.playerConfig.metadata, transcripts: [{ languageCode: 'en', artifactUrl: 'en.vtt', identifier: 'en-id', language: 'English' }] }
+    };
+    const changes: SimpleChanges = {
+      playerConfig: new SimpleChange(mockData.playerConfig, updatedConfig, false)
+    };
+    component.ngOnChanges(changes);
+    expect(component.viewerService.updateTranscripts).toHaveBeenCalledWith(updatedConfig.metadata.transcripts);
+    expect(typeof component.playerConfig).toBe('object');
+  });
+
+  it('should parse a string playerConfig update and assign it back to this.playerConfig (web-component path)', () => {
+    component.isInitialized = true;
+    component.ngOnInit();
+    spyOn(component.viewerService, 'updateTranscripts');
+    const updatedConfig = {
+      ...mockData.playerConfig,
+      metadata: { ...mockData.playerConfig.metadata, transcripts: [{ languageCode: 'fr', artifactUrl: 'fr.vtt', identifier: 'fr-id', language: 'French' }] }
+    };
+    const changes: SimpleChanges = {
+      playerConfig: new SimpleChange(mockData.playerConfig, JSON.stringify(updatedConfig), false)
+    };
+    component.ngOnChanges(changes);
+    // Prior to this fix, this.playerConfig stayed an unparsed string here,
+    // silently breaking every [config]/[playerConfig] template binding that
+    // depends on it (including this hot-reload path itself).
+    expect(typeof component.playerConfig).toBe('object');
+    expect((component.playerConfig as any).metadata.transcripts).toEqual(updatedConfig.metadata.transcripts);
+    expect(component.viewerService.updateTranscripts).toHaveBeenCalledWith(updatedConfig.metadata.transcripts);
+  });
 });

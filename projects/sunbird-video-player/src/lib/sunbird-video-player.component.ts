@@ -3,6 +3,7 @@ import {
   HostListener, ElementRef, ViewChild, AfterViewInit, Renderer2, OnDestroy
 } from '@angular/core';
 import { ErrorService, errorCode, errorMessage, ISideBarEvent } from '@project-sunbird/sunbird-player-sdk-v9';
+import * as _ from 'lodash-es';
 
 import { PlayerConfig } from './playerInterfaces';
 import { IAction } from './playerInterfaces';
@@ -125,7 +126,13 @@ export class SunbirdVideoPlayerComponent implements OnInit, AfterViewInit, OnDes
 
     /* eslint-disable @typescript-eslint/dot-notation */
     this.nextContent = this.playerConfig?.config?.nextContent;
-    this.lastRawTranscripts = this.playerConfig?.metadata?.transcripts;
+    // Cloned rather than a reference - handleTranscriptsData() mutates
+    // transcript objects in place (adds `default`), and this array is the
+    // same object graph as viewerService.transcripts, so keeping a plain
+    // reference here would make this "raw" snapshot drift right along with
+    // the mutated live data, breaking the change-comparison in
+    // handlePlayerConfigUpdate below.
+    this.lastRawTranscripts = _.cloneDeep(this.playerConfig?.metadata?.transcripts);
     this.traceId = this.playerConfig.config['traceId'];
     this.sideMenuConfig = { ...this.sideMenuConfig, ...this.playerConfig.config.sideMenu };
     this.videoPlayerService.initialize(this.playerConfig);
@@ -168,9 +175,16 @@ export class SunbirdVideoPlayerComponent implements OnInit, AfterViewInit, OnDes
     } else {
       parsedConfig = rawConfig;
     }
+    // Angular sets the raw @Input value before ngOnChanges runs, so in the
+    // web-component path (where playerConfig arrives as a JSON string)
+    // this.playerConfig would otherwise stay a string for the rest of the
+    // component's life - breaking every `[config]`/`[playerConfig]` template
+    // binding and this.config-dependent logic downstream (including
+    // syncTranscriptTracks, which is the whole point of this update path).
+    this.playerConfig = parsedConfig;
     const newTranscripts = parsedConfig?.metadata?.transcripts;
     if (newTranscripts && JSON.stringify(newTranscripts) !== JSON.stringify(this.lastRawTranscripts)) {
-      this.lastRawTranscripts = newTranscripts;
+      this.lastRawTranscripts = _.cloneDeep(newTranscripts);
       this.viewerService.updateTranscripts(newTranscripts);
     }
   }

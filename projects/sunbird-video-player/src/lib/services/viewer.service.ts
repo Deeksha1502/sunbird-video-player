@@ -106,6 +106,9 @@ export class ViewerService {
   }
 
   private prefixTranscriptUrls(transcripts: Transcripts, basePath: string): Transcripts {
+    if (!_.isArray(transcripts)) {
+      return transcripts;
+    }
     return transcripts.map((trans) => ({
       ...trans,
       artifactUrl: trans.artifactUrl ? `${basePath}/${trans.artifactUrl}` : trans.artifactUrl,

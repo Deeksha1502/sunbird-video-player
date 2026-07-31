@@ -213,8 +213,12 @@ div[data-marker-key] {
 // rather than depending on a one-time load check.
 // video.js creates this element itself (bypassing Angular's renderer), so it
 // never carries the emulated-encapsulation content attribute - ::ng-deep is
-// required for this rule to match it.
-::ng-deep .video-js.word-highlight-active .vjs-text-track-display {
+// required for this rule to match it. The :host prefix is required too -
+// without it Angular strips ::ng-deep down to a fully global, unscoped rule,
+// which (since this ships as both an Angular library and a web component
+// embedded in host apps) would leak this !important rule to every other
+// video.js instance on the host page, not just this component's own player.
+:host ::ng-deep .video-js.word-highlight-active .vjs-text-track-display {
   display: none !important;
 }
 

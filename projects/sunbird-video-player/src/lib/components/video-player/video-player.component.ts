@@ -54,6 +54,14 @@ export class VideoPlayerComponent implements AfterViewInit, OnInit, OnDestroy, O
   // wordByWordUrl equals artifactUrl) whose mode must be left alone since
   // native captions rendering depends on it staying 'showing'.
   private activeWordTrackOwned = false;
+  // Guards against telemetry double-firing: trackTranscriptEvent's 'change'
+  // listener re-triggers subtitleChanged on ANY textTracks mode change, not
+  // just a viewer-driven CC-menu pick - so our own internal mode writes
+  // (forcing a default track to show, disabling a sibling, arming/disarming
+  // the overlay's metadata track) would otherwise cause a second, spurious
+  // handleEventsForTranscripts call ~10ms later, duplicating HEARTBEAT/
+  // INTERACT events. Set true around any mode write we make ourselves.
+  private suppressTrackChangeTelemetry = false;
   private wordHighlightCues: any[] = [];
   private wordHighlightCueIndex = 0;
   private wordHighlightLineWords: string[] = [];
@@ -127,8 +135,8 @@ export class VideoPlayerComponent implements AfterViewInit, OnInit, OnDestroy, O
       this.player.ready(() => {
         this.attachTranscriptTracks(this.transcripts);
       });
-      this.transcriptsUpdatedSubscription = this.viewerService.transcriptsUpdated.subscribe((updated) => {
-        this.syncTranscriptTracks(updated);
+      this.transcriptsUpdatedSubscription = this.viewerService.transcriptsUpdated.subscribe(() => {
+        this.syncTranscriptTracks();
       });
       const markers = this.viewerService.getMarkers();
 
@@ -314,7 +322,11 @@ export class VideoPlayerComponent implements AfterViewInit, OnInit, OnDestroy, O
   trackTranscriptEvent() {
     let timeout;
     const player = this.player;
+    const component = this;
     this.player.textTracks().on('change', function action(event) {
+      if (component.suppressTrackChangeTelemetry) {
+        return;
+      }
       clearTimeout(timeout);
       let transcriptObject = {};
       this.tracks_.filter((track) => {
@@ -328,8 +340,39 @@ export class VideoPlayerComponent implements AfterViewInit, OnInit, OnDestroy, O
       }, 10);
     });
   }
-  private trackKey(kind: string, languageCode: string): string {
-    return `${kind}|${languageCode}`;
+
+  // Wraps a mode write we make ourselves so trackTranscriptEvent's 'change'
+  // listener (above) ignores the resulting re-entrant event instead of
+  // treating it as a viewer-driven caption switch. Held slightly longer than
+  // that listener's own 10ms debounce so our write can never race it.
+  private withSuppressedTrackChangeTelemetry(write: () => void) {
+    this.suppressTrackChangeTelemetry = true;
+    write();
+    setTimeout(() => { this.suppressTrackChangeTelemetry = false; }, 20);
+  }
+  // Includes the resolved src so that a hot-reload payload changing a
+  // language's artifactUrl/wordByWordUrl (a corrected or regenerated
+  // transcript) produces a different key - which makes the reconciliation
+  // loop in syncTranscriptTracks naturally treat it as remove-old + add-new
+  // instead of silently keeping the stale track attached.
+  private trackKey(kind: string, languageCode: string, src: string): string {
+    return `${kind}|${languageCode}|${src}`;
+  }
+
+  // Ensures only one captions/subtitles track is ever 'showing' at a time.
+  // Needed because forcing a newly-arrived default track to 'showing' below
+  // bypasses the CC menu's own mutual-exclusivity handling - without this, a
+  // late-arriving default language (e.g. a hot-reloaded transcript the host
+  // marked default) could end up showing alongside a track the viewer had
+  // already selected, rendering two overlapping captions at once.
+  private disableOtherCaptionsTracks(exceptTrack: any) {
+    const textTracks = this.player.textTracks();
+    for (let i = 0; i < textTracks.length; i++) {
+      const track = textTracks[i];
+      if (track !== exceptTrack && (track.kind === 'captions' || track.kind === 'subtitles') && track.mode === 'showing') {
+        this.withSuppressedTrackChangeTelemetry(() => { track.mode = 'disabled'; });
+      }
+    }
   }
 
   private addTranscriptTrack(kind: 'captions' | 'metadata', trans: any) {
@@ -355,9 +398,12 @@ export class VideoPlayerComponent implements AfterViewInit, OnInit, OnDestroy, O
     // be forced here explicitly or the "default" language would never show
     // without the viewer manually opening the CC menu.
     if (isDefault && trackEl.track) {
-      trackEl.track.mode = 'showing';
+      if (kind === 'captions') {
+        this.disableOtherCaptionsTracks(trackEl.track);
+      }
+      this.withSuppressedTrackChangeTelemetry(() => { trackEl.track.mode = 'showing'; });
     }
-    this.attachedTextTracks.set(this.trackKey(kind, trans.languageCode), trackEl.track);
+    this.attachedTextTracks.set(this.trackKey(kind, trans.languageCode, src), trackEl.track);
   }
 
   // A distinct metadata track (and its own fetch) is only needed when
@@ -377,12 +423,16 @@ export class VideoPlayerComponent implements AfterViewInit, OnInit, OnDestroy, O
     });
   }
 
+  // Lower-cased for consistency with findWordHighlightSource's comparison -
+  // both ultimately originate from the same trans.languageCode, but nothing
+  // guarantees the browser/video.js won't normalize TextTrack.language
+  // differently than the raw config value.
   private findShowingCaptionsLanguage(): string {
     const tracks = this.player.textTracks();
     for (let i = 0; i < tracks.length; i++) {
       const track = tracks[i];
       if ((track.kind === 'captions' || track.kind === 'subtitles') && track.mode === 'showing') {
-        return track.language;
+        return track.language ? track.language.toLowerCase() : track.language;
       }
     }
     return null;
@@ -394,32 +444,50 @@ export class VideoPlayerComponent implements AfterViewInit, OnInit, OnDestroy, O
   // mounted and playing. Removes tracks no longer present, adds new ones,
   // and re-arms the word-highlight overlay if a wordByWordUrl just became
   // available for the language currently showing.
-  private syncTranscriptTracks(rawTranscripts: any[]) {
+  private syncTranscriptTracks() {
     const selected = _.get(this.config, 'transcripts') || [];
+    // handleTranscriptsData() also overwrites metaData.transcripts (the
+    // telemetry record of every language the viewer has switched to/from
+    // this session) with just `selected` - fine for the very first call from
+    // ngOnInit, but calling it again here would wipe that accumulated
+    // history on every hot reload. Snapshot and restore around the call so
+    // only the derived `default` flags are picked up, not the telemetry
+    // side effect.
+    const metaDataTranscriptsSnapshot = [...(this.viewerService.metaData.transcripts || [])];
     const newTranscripts = this.viewerService.handleTranscriptsData(selected);
+    this.viewerService.metaData.transcripts = metaDataTranscriptsSnapshot;
     const desiredKeys = new Set<string>();
     (newTranscripts || []).forEach((trans) => {
-      desiredKeys.add(this.trackKey('captions', trans.languageCode));
+      desiredKeys.add(this.trackKey('captions', trans.languageCode, trans.artifactUrl));
       if (this.needsDistinctWordTrack(trans)) {
-        desiredKeys.add(this.trackKey('metadata', trans.languageCode));
+        desiredKeys.add(this.trackKey('metadata', trans.languageCode, trans.wordByWordUrl));
       }
     });
     Array.from(this.attachedTextTracks.keys()).forEach((key) => {
       if (!desiredKeys.has(key)) {
         const track = this.attachedTextTracks.get(key);
+        // The track being removed may be the one currently driving the
+        // overlay (host pushed a payload that dropped this language) -
+        // deactivate first so activeWordTrack/wordHighlightCues don't keep
+        // referencing a detached track and rendering stale text forever.
+        if (track === this.activeWordTrack) {
+          this.deactivateWordHighlightTrack();
+        }
         this.player.removeRemoteTextTrack(track);
         this.attachedTextTracks.delete(key);
       }
     });
     const showingLanguage = this.findShowingCaptionsLanguage();
     (newTranscripts || []).forEach((trans) => {
-      if (!this.attachedTextTracks.has(this.trackKey('captions', trans.languageCode))) {
+      if (!this.attachedTextTracks.has(this.trackKey('captions', trans.languageCode, trans.artifactUrl))) {
         this.addTranscriptTrack('captions', trans);
       }
-      if (this.needsDistinctWordTrack(trans) && !this.attachedTextTracks.has(this.trackKey('metadata', trans.languageCode))) {
+      if (this.needsDistinctWordTrack(trans) &&
+        !this.attachedTextTracks.has(this.trackKey('metadata', trans.languageCode, trans.wordByWordUrl))) {
         this.addTranscriptTrack('metadata', trans);
       }
-      if (trans.wordByWordUrl && !this.activeWordTrack && showingLanguage === trans.languageCode) {
+      const languageCode = trans.languageCode ? trans.languageCode.toLowerCase() : trans.languageCode;
+      if (trans.wordByWordUrl && !this.activeWordTrack && showingLanguage === languageCode) {
         this.activateWordHighlightTrack(trans.languageCode);
       }
     });
@@ -464,8 +532,11 @@ export class VideoPlayerComponent implements AfterViewInit, OnInit, OnDestroy, O
   // overlay has nothing, with no timers or video.js-internal load/error
   // events involved.
   // Prefers a dedicated metadata track for the language; falls back to the
-  // same-language captions track's own cues when no distinct wordByWordUrl
-  // was ever fetched (the common case - wordByWordUrl equals artifactUrl).
+  // same-language captions track's own cues ONLY when this transcript
+  // actually declared wordByWordUrl pointing at that same file (the "no
+  // second fetch" dedup case) - content with no wordByWordUrl at all never
+  // opted into word-highlight, so it must fall through to null and let
+  // native captions render completely untouched.
   private findWordHighlightSource(languageCode: string): { track: any; owned: boolean } | null {
     const textTracks = this.player.textTracks();
     let captionsTrack = null;
@@ -481,14 +552,20 @@ export class VideoPlayerComponent implements AfterViewInit, OnInit, OnDestroy, O
         captionsTrack = track;
       }
     }
-    return captionsTrack ? { track: captionsTrack, owned: false } : null;
+    if (!captionsTrack) {
+      return null;
+    }
+    const trans = _.find(this.transcripts, (t: any) =>
+      t.languageCode && t.languageCode.toLowerCase() === languageCode.toLowerCase());
+    const reusesCaptionsFile = trans && trans.wordByWordUrl && trans.wordByWordUrl === trans.artifactUrl;
+    return reusesCaptionsFile ? { track: captionsTrack, owned: false } : null;
   }
 
   private activateWordHighlightTrack(languageCode: string) {
     const source = this.findWordHighlightSource(languageCode);
     const wordTrack = source ? source.track : null;
     if (this.activeWordTrack && this.activeWordTrack !== wordTrack && this.activeWordTrackOwned) {
-      this.activeWordTrack.mode = 'disabled';
+      this.withSuppressedTrackChangeTelemetry(() => { this.activeWordTrack.mode = 'disabled'; });
     }
     this.activeWordTrack = wordTrack;
     this.activeWordTrackOwned = !!source && source.owned;
@@ -500,7 +577,7 @@ export class VideoPlayerComponent implements AfterViewInit, OnInit, OnDestroy, O
     // track nothing else depends on - when reusing the captions track, its
     // mode must stay whatever native caption rendering already set it to.
     if (this.activeWordTrackOwned) {
-      wordTrack.mode = 'hidden';
+      this.withSuppressedTrackChangeTelemetry(() => { wordTrack.mode = 'hidden'; });
     }
     // In case cues are already loaded (e.g. re-enabling a track the user had
     // on before) and playback is already mid-video, position the overlay
@@ -511,7 +588,7 @@ export class VideoPlayerComponent implements AfterViewInit, OnInit, OnDestroy, O
 
   private deactivateWordHighlightTrack() {
     if (this.activeWordTrack && this.activeWordTrackOwned) {
-      this.activeWordTrack.mode = 'disabled';
+      this.withSuppressedTrackChangeTelemetry(() => { this.activeWordTrack.mode = 'disabled'; });
     }
     this.activeWordTrack = null;
     this.activeWordTrackOwned = false;

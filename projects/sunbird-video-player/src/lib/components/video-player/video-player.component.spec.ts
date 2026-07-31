@@ -353,8 +353,8 @@ describe('VideoPlayerComponent', () => {
     const transcripts = [{ language: 'English', languageCode: 'en', artifactUrl: 'en.vtt', wordByWordUrl: 'en-word.vtt' }];
     (component as any).attachTranscriptTracks(transcripts);
     expect(component.player.addRemoteTextTrack).toHaveBeenCalledTimes(2);
-    expect((component as any).attachedTextTracks.get('captions|en')).toBe(captionsTrack.track);
-    expect((component as any).attachedTextTracks.get('metadata|en')).toBe(metadataTrack.track);
+    expect((component as any).attachedTextTracks.get('captions|en|en.vtt')).toBe(captionsTrack.track);
+    expect((component as any).attachedTextTracks.get('metadata|en|en-word.vtt')).toBe(metadataTrack.track);
   });
 
   it('should not attach a metadata track when wordByWordUrl is absent', () => {
@@ -364,16 +364,19 @@ describe('VideoPlayerComponent', () => {
     };
     (component as any).attachTranscriptTracks([{ language: 'English', languageCode: 'en', artifactUrl: 'en.vtt' }]);
     expect(component.player.addRemoteTextTrack).toHaveBeenCalledTimes(1);
-    expect((component as any).attachedTextTracks.has('metadata|en')).toBeFalsy();
+    expect(Array.from((component as any).attachedTextTracks.keys()).some((k: string) => k.startsWith('metadata|'))).toBeFalsy();
   });
 
-  it('should mark the default transcript track as showing', () => {
+  it('should mark the default transcript track as showing and disable other showing captions tracks', () => {
     const captionsTrack = { track: { mode: 'disabled' } };
+    const otherShowingTrack: any = { kind: 'captions', mode: 'showing' };
     component.player = {
-      addRemoteTextTrack: jasmine.createSpy('addRemoteTextTrack').and.returnValue(captionsTrack)
+      addRemoteTextTrack: jasmine.createSpy('addRemoteTextTrack').and.returnValue(captionsTrack),
+      textTracks: jasmine.createSpy('textTracks').and.returnValue([otherShowingTrack])
     };
     (component as any).addTranscriptTrack('captions', { language: 'English', languageCode: 'en', artifactUrl: 'en.vtt', default: true });
     expect(captionsTrack.track.mode).toBe('showing');
+    expect(otherShowingTrack.mode).toBe('disabled');
   });
 
   it('should not throw when addRemoteTextTrack returns undefined because the tech is not ready yet', () => {
@@ -388,8 +391,9 @@ describe('VideoPlayerComponent', () => {
   it('should remove stale tracks and add new ones when transcripts are synced', () => {
     const oldTrack = { mode: 'showing' };
     const newCaptionsTrack = { track: { mode: 'disabled' } };
-    (component as any).attachedTextTracks.set('captions|fr', oldTrack);
+    (component as any).attachedTextTracks.set('captions|fr|fr.vtt', oldTrack);
     component.config = { transcripts: [] };
+    component.viewerService.metaData = { transcripts: [] };
     spyOn(component.viewerService, 'handleTranscriptsData').and.returnValue([
       { language: 'English', languageCode: 'en', artifactUrl: 'en.vtt', identifier: 'en-id' }
     ]);
@@ -398,10 +402,46 @@ describe('VideoPlayerComponent', () => {
       addRemoteTextTrack: jasmine.createSpy('addRemoteTextTrack').and.returnValue(newCaptionsTrack),
       textTracks: jasmine.createSpy('textTracks').and.returnValue([])
     };
-    (component as any).syncTranscriptTracks([]);
+    (component as any).syncTranscriptTracks();
     expect(component.player.removeRemoteTextTrack).toHaveBeenCalledWith(oldTrack);
-    expect((component as any).attachedTextTracks.has('captions|fr')).toBeFalsy();
-    expect((component as any).attachedTextTracks.get('captions|en')).toBe(newCaptionsTrack.track);
+    expect((component as any).attachedTextTracks.has('captions|fr|fr.vtt')).toBeFalsy();
+    expect((component as any).attachedTextTracks.get('captions|en|en.vtt')).toBe(newCaptionsTrack.track);
+  });
+
+  it('should preserve accumulated telemetry transcript history across a sync', () => {
+    (component as any).attachedTextTracks.set('captions|fr|fr.vtt', { mode: 'showing' });
+    component.config = { transcripts: [] };
+    component.viewerService.metaData = { transcripts: ['en', 'fr', 'off'] };
+    spyOn(component.viewerService, 'handleTranscriptsData').and.callFake((selected) => {
+      // Simulate the real method's side effect of overwriting metaData.transcripts.
+      component.viewerService.metaData.transcripts = selected;
+      return [{ language: 'English', languageCode: 'en', artifactUrl: 'en.vtt', identifier: 'en-id' }];
+    });
+    component.player = {
+      removeRemoteTextTrack: jasmine.createSpy('removeRemoteTextTrack'),
+      addRemoteTextTrack: jasmine.createSpy('addRemoteTextTrack').and.returnValue({ track: { mode: 'disabled' } }),
+      textTracks: jasmine.createSpy('textTracks').and.returnValue([])
+    };
+    (component as any).syncTranscriptTracks();
+    expect(component.viewerService.metaData.transcripts).toEqual(['en', 'fr', 'off']);
+  });
+
+  it('should deactivate the word-highlight overlay when its active track is removed during a sync', () => {
+    const activeTrack = { mode: 'hidden' };
+    (component as any).attachedTextTracks.set('metadata|fr|fr.vtt', activeTrack);
+    (component as any).activeWordTrack = activeTrack;
+    (component as any).activeWordTrackOwned = true;
+    component.config = { transcripts: [] };
+    component.viewerService.metaData = { transcripts: [] };
+    spyOn(component.viewerService, 'handleTranscriptsData').and.returnValue([]);
+    component.player = {
+      removeRemoteTextTrack: jasmine.createSpy('removeRemoteTextTrack'),
+      textTracks: jasmine.createSpy('textTracks').and.returnValue([])
+    };
+    (component as any).syncTranscriptTracks();
+    expect(activeTrack.mode).toBe('disabled');
+    expect((component as any).activeWordTrack).toBeNull();
+    expect(component.player.removeRemoteTextTrack).toHaveBeenCalledWith(activeTrack);
   });
 
   it('should activate the matching metadata track for word-highlight overlay', () => {
@@ -432,8 +472,9 @@ describe('VideoPlayerComponent', () => {
     expect(component.player.removeClass).toHaveBeenCalledWith('word-highlight-active');
   });
 
-  it('should reuse the same-language captions track when no distinct metadata track exists', () => {
+  it('should reuse the same-language captions track when wordByWordUrl equals artifactUrl and no distinct metadata track exists', () => {
     const captionsTrack: any = { kind: 'captions', language: 'en', mode: 'showing', cues: [] };
+    component.transcripts = [{ languageCode: 'en', artifactUrl: 'en.vtt', wordByWordUrl: 'en.vtt' }];
     component.player = {
       textTracks: jasmine.createSpy('textTracks').and.returnValue([captionsTrack]),
       currentTime: jasmine.createSpy('currentTime').and.returnValue(0),
@@ -448,6 +489,21 @@ describe('VideoPlayerComponent', () => {
     expect(captionsTrack.mode).toBe('showing');
   });
 
+  it('should never arm the overlay off the captions track for content with no wordByWordUrl at all', () => {
+    const captionsTrack: any = { kind: 'captions', language: 'en', mode: 'showing', cues: [] };
+    // No wordByWordUrl anywhere - today's ordinary content with plain captions.
+    component.transcripts = [{ languageCode: 'en', artifactUrl: 'en.vtt' }];
+    component.player = {
+      textTracks: jasmine.createSpy('textTracks').and.returnValue([captionsTrack]),
+      currentTime: jasmine.createSpy('currentTime').and.returnValue(0),
+      addClass: jasmine.createSpy('addClass'),
+      removeClass: jasmine.createSpy('removeClass')
+    };
+    (component as any).activateWordHighlightTrack('en');
+    expect((component as any).activeWordTrack).toBeNull();
+    expect(component.player.addClass).not.toHaveBeenCalledWith('word-highlight-active');
+  });
+
   it('should not fetch a distinct metadata track when wordByWordUrl equals artifactUrl', () => {
     const captionsTrack = { track: { mode: 'disabled' } };
     component.player = {
@@ -457,7 +513,7 @@ describe('VideoPlayerComponent', () => {
       { language: 'English', languageCode: 'en', artifactUrl: 'en.vtt', wordByWordUrl: 'en.vtt' }
     ]);
     expect(component.player.addRemoteTextTrack).toHaveBeenCalledTimes(1);
-    expect((component as any).attachedTextTracks.has('metadata|en')).toBeFalsy();
+    expect(Array.from((component as any).attachedTextTracks.keys()).some((k: string) => k.startsWith('metadata|'))).toBeFalsy();
   });
 
   it('should accumulate consecutive word cues within the gap and character thresholds', () => {
