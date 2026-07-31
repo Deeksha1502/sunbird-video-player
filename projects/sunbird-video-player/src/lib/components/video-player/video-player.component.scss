@@ -201,6 +201,57 @@ div[data-marker-key] {
   margin-left: 0.7% !important;
 }
 
-.vjs-texttrack-settings { // To do because we are disabled this feature and there is enhancement needed based on feture and requirements  
+.vjs-texttrack-settings { // To do because we are disabled this feature and there is enhancement needed based on feature and requirements
   display: none;
+}
+
+// Only hidden while the word-highlight overlay actually has a word to show
+// right now - showWordHighlightOverlay is recomputed on every timeupdate/seek
+// tick (see updateWordHighlightOverlay/rebuildWordHighlightAt), so content
+// without a wordByWordUrl, or where the word-level VTT is missing/broken/only
+// partially covers the video, continuously falls back to native captions
+// rather than depending on a one-time load check.
+// video.js creates this element itself (bypassing Angular's renderer), so it
+// never carries the emulated-encapsulation content attribute - ::ng-deep is
+// required for this rule to match it. The :host prefix is required too -
+// without it Angular strips ::ng-deep down to a fully global, unscoped rule,
+// which (since this ships as both an Angular library and a web component
+// embedded in host apps) would leak this !important rule to every other
+// video.js instance on the host page, not just this component's own player.
+:host ::ng-deep .video-js.word-highlight-active .vjs-text-track-display {
+  display: none !important;
+}
+
+// Sibling of <video>, positioned against the same ancestor
+// (.sunbird-video-player-container, position:relative) that
+// .player-for-back-ward-controls above already uses to align exactly to the
+// video's box - percentage-based bottom/font-size keep it proportional to
+// that box without needing to live inside video.js's own DOM (which strips
+// unrecognized children when it replaces the <video> tag with its tech
+// element - do not move this element inside <video>, see PR discussion).
+.word-highlight-overlay {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 12%;
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+  z-index: 3;
+
+  &--hidden {
+    display: none;
+  }
+
+  span {
+    max-width: 90%;
+    padding: 0.3em 0.6em;
+    background: rgba(0, 0, 0, 0.75);
+    color: #fff;
+    font-size: clamp(0.875rem, 2.2vw, 1.5rem);
+    font-weight: 400;
+    line-height: 1.4;
+    border-radius: 0.2em;
+    text-align: center;
+  }
 }

@@ -33,6 +33,12 @@ export class ViewerService {
   public visitedLength = 0;
   public uniqueVisitedLength;
   public sidebarMenuEvent = new EventEmitter<any>();
+  // Emits whenever transcripts are updated after initial load (e.g. a
+  // generate-transcript job completing while the player is already mounted).
+  // handleTranscriptsData() itself only recomputes from whatever is already
+  // in `this.transcripts` - updateTranscripts() is the entry point for
+  // pushing in genuinely new data from outside.
+  public transcriptsUpdated = new EventEmitter<Transcripts>();
   public traceId: string;
   public isAvailableLocally = false;
   public interceptionPoints: any;
@@ -47,6 +53,10 @@ export class ViewerService {
   public transcripts: Transcripts;
   public playBitStartTime = 0;
   public playBitEndTime = 0;
+  // Set alongside isAvailableLocally in initialize() - reused by
+  // updateTranscripts() so a transcript payload pushed in later (hot-reload)
+  // gets the same offline basePath prefixing as the initial one.
+  private localBasePath: string;
   constructor(private videoPlayerService: SunbirdVideoPlayerService,
               private utilService: UtilService,
               private http: HttpClient,
@@ -83,9 +93,27 @@ export class ViewerService {
     this.endPageSeen = false;
     if (this.isAvailableLocally) {
       const basePath = (metadata.streamingUrl) ? (metadata.streamingUrl) : (metadata.basePath || metadata.baseDir);
+      this.localBasePath = basePath;
       this.streamingUrl = `${basePath}/${metadata.artifactUrl}`;
       this.mimeType = metadata.mimeType;
+      // Transcript/caption files ship inside the same offline .ecar bundle as
+      // the video and are expected to be relative paths, same as
+      // metadata.artifactUrl above - without this they'd resolve against the
+      // page origin instead of the local content basePath and fail to load
+      // when playing offline (e.g. downloaded content in the mobile app).
+      this.transcripts = this.prefixTranscriptUrls(this.transcripts, basePath);
     }
+  }
+
+  private prefixTranscriptUrls(transcripts: Transcripts, basePath: string): Transcripts {
+    if (!_.isArray(transcripts)) {
+      return transcripts;
+    }
+    return transcripts.map((trans) => ({
+      ...trans,
+      artifactUrl: trans.artifactUrl ? `${basePath}/${trans.artifactUrl}` : trans.artifactUrl,
+      wordByWordUrl: trans.wordByWordUrl ? `${basePath}/${trans.wordByWordUrl}` : trans.wordByWordUrl
+    }));
   }
   handleTranscriptsData(selectedTranscripts) {
     this.metaData.transcripts = selectedTranscripts;
@@ -106,6 +134,15 @@ export class ViewerService {
       });
     }
     return this.transcripts;
+  }
+
+  updateTranscripts(transcripts: Transcripts) {
+    let newTranscripts = transcripts || [];
+    if (this.isAvailableLocally && this.localBasePath) {
+      newTranscripts = this.prefixTranscriptUrls(newTranscripts, this.localBasePath);
+    }
+    this.transcripts = newTranscripts;
+    this.transcriptsUpdated.emit(this.transcripts);
   }
   async getPlayerOptions() {
     if (!this.streamingUrl) {

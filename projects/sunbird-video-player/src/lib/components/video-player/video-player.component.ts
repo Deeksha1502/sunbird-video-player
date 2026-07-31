@@ -6,6 +6,7 @@ import * as _ from 'lodash-es';
 import videojs from 'video.js';
 import 'videojs-contrib-quality-levels';
 import videojshttpsourceselector from 'videojs-http-source-selector';
+import { Subscription } from 'rxjs';
 import { ViewerService } from '../../services/viewer.service';
 import { IAction } from '../../playerInterfaces';
 
@@ -32,6 +33,8 @@ export class VideoPlayerComponent implements AfterViewInit, OnInit, OnDestroy, O
   private unlistenTargetTouchStart: () => void;
   @ViewChild('target', { static: true }) target: ElementRef;
   @ViewChild('controlDiv', { static: true }) controlDiv: ElementRef;
+  @ViewChild('wordHighlightOverlay', { static: true }) wordHighlightOverlay: ElementRef;
+  @ViewChild('wordHighlightLine', { static: true }) wordHighlightLine: ElementRef;
   player: any;
   totalSeekedLength = 0;
   previousTime = 0;
@@ -44,6 +47,47 @@ export class VideoPlayerComponent implements AfterViewInit, OnInit, OnDestroy, O
   setMetaDataConfig = false;
   totalDuration = 0;
   disablePictureInPicture = false;
+  showWordHighlightOverlay = false;
+  private activeWordTrack: any = null;
+  // True when activeWordTrack is a dedicated metadata track we control the
+  // mode of; false when it's a shared captions track (reused because
+  // wordByWordUrl equals artifactUrl) whose mode must be left alone since
+  // native captions rendering depends on it staying 'showing'.
+  private activeWordTrackOwned = false;
+  // Guards against telemetry double-firing: trackTranscriptEvent's 'change'
+  // listener re-triggers subtitleChanged on ANY textTracks mode change, not
+  // just a viewer-driven CC-menu pick - so our own internal mode writes
+  // (forcing a default track to show, disabling a sibling, arming/disarming
+  // the overlay's metadata track) would otherwise cause a second, spurious
+  // handleEventsForTranscripts call ~10ms later, duplicating HEARTBEAT/
+  // INTERACT events. Set true around any mode write we make ourselves.
+  private suppressTrackChangeTelemetry = false;
+  private wordHighlightCues: any[] = [];
+  private wordHighlightCueIndex = 0;
+  private wordHighlightLineWords: string[] = [];
+  private wordHighlightLastCueEnd = 0;
+  // Configurable via config.wordHighlight - see ngOnInit.
+  private wordHighlightGapThresholdSeconds = 0.3;
+  // Independent ceiling on top of the gap-based clearing above - ASR-generated
+  // word-level VTTs can have zero gap between contiguous cues for an entire
+  // monologue, in which case the gap check alone never fires and the line
+  // grows without bound (observed with real word-by-word Urdu captions).
+  // Netflix's per-line character cap (~42) is used as that ceiling - a
+  // reading-speed-based duration cap was tried and reverted: it compares
+  // against elapsed *speech* time, which is inherently slower per-character
+  // than any reasonable reading speed, so it would clear the line almost
+  // immediately after every single word.
+  private wordHighlightMaxLineCharacters = 42;
+  // Tracks every <track> currently attached via player.addRemoteTextTrack(),
+  // keyed by `${kind}|${languageCode}`. video.js's removeRemoteTextTrack()
+  // only works on tracks added this way (not on statically-declared HTML
+  // <track> elements) - so ALL transcript tracks, including the first ones
+  // loaded, go through this same path. That's what makes it possible to
+  // cleanly add/remove tracks later when transcriptsUpdated fires (e.g. a
+  // transcript finishing generation while the player is already mounted),
+  // without duplicating or leaking tracks.
+  private attachedTextTracks = new Map<string, any>();
+  private transcriptsUpdatedSubscription: Subscription;
 
 
   constructor(public viewerService: ViewerService, private renderer2: Renderer2,
@@ -51,6 +95,8 @@ export class VideoPlayerComponent implements AfterViewInit, OnInit, OnDestroy, O
   ngOnInit() {
     this.disablePictureInPicture = _.get(this.config, 'disablePictureInPictureMode', false);
     this.transcripts = this.viewerService.handleTranscriptsData(_.get(this.config, 'transcripts') || []);
+    this.wordHighlightGapThresholdSeconds = _.get(this.config, 'wordHighlight.gapThresholdSeconds', 0.3);
+    this.wordHighlightMaxLineCharacters = _.get(this.config, 'wordHighlight.maxLineCharacters', 42);
   }
   ngAfterViewInit() {
     this.viewerService.getPlayerOptions().then(async (options) => {
@@ -82,6 +128,16 @@ export class VideoPlayerComponent implements AfterViewInit, OnInit, OnDestroy, O
       } as any);
       this.player.videojshttpsourceselector = videojshttpsourceselector;
       this.player.videojshttpsourceselector();
+      // player.addRemoteTextTrack() silently returns undefined if called
+      // before player.tech_ is attached - not guaranteed yet just because the
+      // videojs(...) promise above has resolved. player.ready() is the
+      // documented-safe point to call it.
+      this.player.ready(() => {
+        this.attachTranscriptTracks(this.transcripts);
+      });
+      this.transcriptsUpdatedSubscription = this.viewerService.transcriptsUpdated.subscribe(() => {
+        this.syncTranscriptTracks();
+      });
       const markers = this.viewerService.getMarkers();
 
       if (markers && markers.length > 0) {
@@ -194,9 +250,13 @@ export class VideoPlayerComponent implements AfterViewInit, OnInit, OnDestroy, O
       'ratechange'];
 
     this.player.on('fullscreenchange', (data) => {
-      // This code is to show the controldiv in fullscreen mode
+      // This code is to show the controldiv (and the word-highlight overlay,
+      // for the same reason) in fullscreen mode - entering fullscreen only
+      // renders the fullscreen element and its descendants, and both of these
+      // are siblings of <video> rather than descendants of it.
       if (this.player.isFullscreen()) {
         this.target.nativeElement.parentNode.appendChild(this.controlDiv.nativeElement);
+        this.target.nativeElement.parentNode.appendChild(this.wordHighlightOverlay.nativeElement);
       }
       this.viewerService.raiseHeartBeatEvent('FULLSCREEN');
     });
@@ -229,12 +289,16 @@ export class VideoPlayerComponent implements AfterViewInit, OnInit, OnDestroy, O
       this.viewerService.currentlength = this.viewerService.metaData.currentDuration;
       this.totalSpentTime += new Date().getTime() - this.startTime;
       this.startTime = new Date().getTime();
+      this.updateWordHighlightOverlay(this.player.currentTime());
       const remainingTime = Math.floor(this.totalDuration - this.player.currentTime());
       if (remainingTime <= 0) {
             this.viewerService.metaData.currentDuration = 0;
             this.handleVideoControls({ type: 'ended' });
             this.viewerService.playerEvent.emit({ type: 'ended' });
       }
+    });
+    this.player.on('seeked', (data) => {
+      this.rebuildWordHighlightAt(this.player.currentTime());
     });
     this.player.on('subtitleChanged', (event, track) => {
       this.handleEventsForTranscripts(track);
@@ -258,7 +322,11 @@ export class VideoPlayerComponent implements AfterViewInit, OnInit, OnDestroy, O
   trackTranscriptEvent() {
     let timeout;
     const player = this.player;
+    const component = this;
     this.player.textTracks().on('change', function action(event) {
+      if (component.suppressTrackChangeTelemetry) {
+        return;
+      }
       clearTimeout(timeout);
       let transcriptObject = {};
       this.tracks_.filter((track) => {
@@ -272,6 +340,160 @@ export class VideoPlayerComponent implements AfterViewInit, OnInit, OnDestroy, O
       }, 10);
     });
   }
+
+  // Wraps a mode write we make ourselves so trackTranscriptEvent's 'change'
+  // listener (above) ignores the resulting re-entrant event instead of
+  // treating it as a viewer-driven caption switch. Held slightly longer than
+  // that listener's own 10ms debounce so our write can never race it.
+  private withSuppressedTrackChangeTelemetry(write: () => void) {
+    this.suppressTrackChangeTelemetry = true;
+    write();
+    setTimeout(() => { this.suppressTrackChangeTelemetry = false; }, 20);
+  }
+  // Includes the resolved src so that a hot-reload payload changing a
+  // language's artifactUrl/wordByWordUrl (a corrected or regenerated
+  // transcript) produces a different key - which makes the reconciliation
+  // loop in syncTranscriptTracks naturally treat it as remove-old + add-new
+  // instead of silently keeping the stale track attached.
+  private trackKey(kind: string, languageCode: string, src: string): string {
+    return `${kind}|${languageCode}|${src}`;
+  }
+
+  // Ensures only one captions/subtitles track is ever 'showing' at a time.
+  // Needed because forcing a newly-arrived default track to 'showing' below
+  // bypasses the CC menu's own mutual-exclusivity handling - without this, a
+  // late-arriving default language (e.g. a hot-reloaded transcript the host
+  // marked default) could end up showing alongside a track the viewer had
+  // already selected, rendering two overlapping captions at once.
+  private disableOtherCaptionsTracks(exceptTrack: any) {
+    const textTracks = this.player.textTracks();
+    for (let i = 0; i < textTracks.length; i++) {
+      const track = textTracks[i];
+      if (track !== exceptTrack && (track.kind === 'captions' || track.kind === 'subtitles') && track.mode === 'showing') {
+        this.withSuppressedTrackChangeTelemetry(() => { track.mode = 'disabled'; });
+      }
+    }
+  }
+
+  private addTranscriptTrack(kind: 'captions' | 'metadata', trans: any) {
+    const src = kind === 'captions' ? trans.artifactUrl : trans.wordByWordUrl;
+    const sourceSuffix = trans.sourceLanguage ? ' (Original)' : '';
+    const label = kind === 'captions' ? `${trans.language}${sourceSuffix}` : `${trans.language} (word-by-word)`;
+    const isDefault = kind === 'captions' ? !!trans.default : false;
+    const trackEl = this.player.addRemoteTextTrack({
+      kind,
+      src,
+      srclang: trans.languageCode,
+      label,
+      default: isDefault
+    }, false);
+    if (!trackEl) {
+      return;
+    }
+    // The native `default` attribute is only auto-honored by the browser
+    // during a media element's INITIAL text-track processing. Tracks added
+    // imperatively via addRemoteTextTrack() after the player/tech is already
+    // set up (which is every track now, including the first ones - see the
+    // note on attachedTextTracks) don't get that automatic pass, so it has to
+    // be forced here explicitly or the "default" language would never show
+    // without the viewer manually opening the CC menu.
+    if (isDefault && trackEl.track) {
+      if (kind === 'captions') {
+        this.disableOtherCaptionsTracks(trackEl.track);
+      }
+      this.withSuppressedTrackChangeTelemetry(() => { trackEl.track.mode = 'showing'; });
+    }
+    this.attachedTextTracks.set(this.trackKey(kind, trans.languageCode, src), trackEl.track);
+  }
+
+  // A distinct metadata track (and its own fetch) is only needed when
+  // wordByWordUrl genuinely points at a different file than the captions
+  // track - when they're the same URL, the captions track's own cues are
+  // reused for the overlay instead of fetching an identical copy twice.
+  private needsDistinctWordTrack(trans: any): boolean {
+    return !!trans.wordByWordUrl && trans.wordByWordUrl !== trans.artifactUrl;
+  }
+
+  private attachTranscriptTracks(transcripts: any[]) {
+    (transcripts || []).forEach((trans) => {
+      this.addTranscriptTrack('captions', trans);
+      if (this.needsDistinctWordTrack(trans)) {
+        this.addTranscriptTrack('metadata', trans);
+      }
+    });
+  }
+
+  // Lower-cased for consistency with findWordHighlightSource's comparison -
+  // both ultimately originate from the same trans.languageCode, but nothing
+  // guarantees the browser/video.js won't normalize TextTrack.language
+  // differently than the raw config value.
+  private findShowingCaptionsLanguage(): string {
+    const tracks = this.player.textTracks();
+    for (let i = 0; i < tracks.length; i++) {
+      const track = tracks[i];
+      if ((track.kind === 'captions' || track.kind === 'subtitles') && track.mode === 'showing') {
+        return track.language ? track.language.toLowerCase() : track.language;
+      }
+    }
+    return null;
+  }
+
+  // Reconciles the live player's attached tracks against a freshly-updated
+  // transcripts array (see ViewerService.transcriptsUpdated) - e.g. a
+  // transcript that finishes generating while the preview/player is already
+  // mounted and playing. Removes tracks no longer present, adds new ones,
+  // and re-arms the word-highlight overlay if a wordByWordUrl just became
+  // available for the language currently showing.
+  private syncTranscriptTracks() {
+    const selected = _.get(this.config, 'transcripts') || [];
+    // handleTranscriptsData() also overwrites metaData.transcripts (the
+    // telemetry record of every language the viewer has switched to/from
+    // this session) with just `selected` - fine for the very first call from
+    // ngOnInit, but calling it again here would wipe that accumulated
+    // history on every hot reload. Snapshot and restore around the call so
+    // only the derived `default` flags are picked up, not the telemetry
+    // side effect.
+    const metaDataTranscriptsSnapshot = [...(this.viewerService.metaData.transcripts || [])];
+    const newTranscripts = this.viewerService.handleTranscriptsData(selected);
+    this.viewerService.metaData.transcripts = metaDataTranscriptsSnapshot;
+    const desiredKeys = new Set<string>();
+    (newTranscripts || []).forEach((trans) => {
+      desiredKeys.add(this.trackKey('captions', trans.languageCode, trans.artifactUrl));
+      if (this.needsDistinctWordTrack(trans)) {
+        desiredKeys.add(this.trackKey('metadata', trans.languageCode, trans.wordByWordUrl));
+      }
+    });
+    Array.from(this.attachedTextTracks.keys()).forEach((key) => {
+      if (!desiredKeys.has(key)) {
+        const track = this.attachedTextTracks.get(key);
+        // The track being removed may be the one currently driving the
+        // overlay (host pushed a payload that dropped this language) -
+        // deactivate first so activeWordTrack/wordHighlightCues don't keep
+        // referencing a detached track and rendering stale text forever.
+        if (track === this.activeWordTrack) {
+          this.deactivateWordHighlightTrack();
+        }
+        this.player.removeRemoteTextTrack(track);
+        this.attachedTextTracks.delete(key);
+      }
+    });
+    const showingLanguage = this.findShowingCaptionsLanguage();
+    (newTranscripts || []).forEach((trans) => {
+      if (!this.attachedTextTracks.has(this.trackKey('captions', trans.languageCode, trans.artifactUrl))) {
+        this.addTranscriptTrack('captions', trans);
+      }
+      if (this.needsDistinctWordTrack(trans) &&
+        !this.attachedTextTracks.has(this.trackKey('metadata', trans.languageCode, trans.wordByWordUrl))) {
+        this.addTranscriptTrack('metadata', trans);
+      }
+      const languageCode = trans.languageCode ? trans.languageCode.toLowerCase() : trans.languageCode;
+      if (trans.wordByWordUrl && !this.activeWordTrack && showingLanguage === languageCode) {
+        this.activateWordHighlightTrack(trans.languageCode);
+      }
+    });
+    this.transcripts = newTranscripts;
+  }
+
   handleEventsForTranscripts(track) {
     let telemetryObject;
     if (!_.isEmpty(track)) {
@@ -287,6 +509,7 @@ export class VideoPlayerComponent implements AfterViewInit, OnInit, OnDestroy, O
       if (_.last(this.viewerService.metaData.transcripts) !== track.languageCode) {
         this.viewerService.metaData.transcripts.push(track.languageCode);
       }
+      this.activateWordHighlightTrack(track.languageCode);
     } else {
       telemetryObject = {
         type: 'TRANSCRIPT_LANGUAGE_OFF',
@@ -295,8 +518,193 @@ export class VideoPlayerComponent implements AfterViewInit, OnInit, OnDestroy, O
         }
       };
       this.viewerService.metaData.transcripts.push('off');
+      this.deactivateWordHighlightTrack();
     }
     this.viewerService.raiseHeartBeatEvent(telemetryObject.type, telemetryObject.extraValues);
+  }
+
+  // Finds a same-language word-level track and arms it as the active source
+  // for the overlay. This never hides native captions by itself - visibility
+  // is entirely decided by updateWordHighlightOverlay/rebuildWordHighlightAt
+  // finding real words to show. That means a wordByWordUrl that's missing,
+  // 404s, is empty/malformed, or simply doesn't cover part of the video needs
+  // no special-case detection: native captions just keep showing whenever the
+  // overlay has nothing, with no timers or video.js-internal load/error
+  // events involved.
+  // Prefers a dedicated metadata track for the language; falls back to the
+  // same-language captions track's own cues ONLY when this transcript
+  // actually declared wordByWordUrl pointing at that same file (the "no
+  // second fetch" dedup case) - content with no wordByWordUrl at all never
+  // opted into word-highlight, so it must fall through to null and let
+  // native captions render completely untouched.
+  private findWordHighlightSource(languageCode: string): { track: any; owned: boolean } | null {
+    const textTracks = this.player.textTracks();
+    let captionsTrack = null;
+    for (let i = 0; i < textTracks.length; i++) {
+      const track = textTracks[i];
+      if (!track.language || track.language.toLowerCase() !== languageCode.toLowerCase()) {
+        continue;
+      }
+      if (track.kind === 'metadata') {
+        return { track, owned: true };
+      }
+      if (track.kind === 'captions' || track.kind === 'subtitles') {
+        captionsTrack = track;
+      }
+    }
+    if (!captionsTrack) {
+      return null;
+    }
+    const trans = _.find(this.transcripts, (t: any) =>
+      t.languageCode && t.languageCode.toLowerCase() === languageCode.toLowerCase());
+    const reusesCaptionsFile = trans && trans.wordByWordUrl && trans.wordByWordUrl === trans.artifactUrl;
+    return reusesCaptionsFile ? { track: captionsTrack, owned: false } : null;
+  }
+
+  private activateWordHighlightTrack(languageCode: string) {
+    const source = this.findWordHighlightSource(languageCode);
+    const wordTrack = source ? source.track : null;
+    if (this.activeWordTrack && this.activeWordTrack !== wordTrack && this.activeWordTrackOwned) {
+      this.withSuppressedTrackChangeTelemetry(() => { this.activeWordTrack.mode = 'disabled'; });
+    }
+    this.activeWordTrack = wordTrack;
+    this.activeWordTrackOwned = !!source && source.owned;
+    this.resetWordHighlightState();
+    if (!wordTrack) {
+      return;
+    }
+    // Only take ownership of the track's mode when it's a dedicated metadata
+    // track nothing else depends on - when reusing the captions track, its
+    // mode must stay whatever native caption rendering already set it to.
+    if (this.activeWordTrackOwned) {
+      this.withSuppressedTrackChangeTelemetry(() => { wordTrack.mode = 'hidden'; });
+    }
+    // In case cues are already loaded (e.g. re-enabling a track the user had
+    // on before) and playback is already mid-video, position the overlay
+    // immediately instead of waiting for the next timeupdate tick to sweep
+    // forward from the start of the cue list.
+    this.rebuildWordHighlightAt(this.player.currentTime());
+  }
+
+  private deactivateWordHighlightTrack() {
+    if (this.activeWordTrack && this.activeWordTrackOwned) {
+      this.withSuppressedTrackChangeTelemetry(() => { this.activeWordTrack.mode = 'disabled'; });
+    }
+    this.activeWordTrack = null;
+    this.activeWordTrackOwned = false;
+    this.resetWordHighlightState();
+    this.renderWordHighlightLine();
+  }
+
+  private resetWordHighlightState() {
+    this.wordHighlightCues = [];
+    this.wordHighlightCueIndex = 0;
+    this.wordHighlightLineWords = [];
+    this.wordHighlightLastCueEnd = 0;
+    this.setWordHighlightOverlayVisible(false);
+  }
+
+  // video.js does not keep our Angular-rendered <video class="video-js"> tag
+  // as its final DOM root - it builds its own tech/wrapper structure - so an
+  // Angular class binding on that original element does not reliably reach
+  // the same ancestor as the dynamically-created .vjs-text-track-display.
+  // player.addClass/removeClass operate on the tech's actual live root
+  // element, which is what the ::ng-deep hide rule needs to match against.
+  private setWordHighlightOverlayVisible(visible: boolean) {
+    if (this.showWordHighlightOverlay === visible) { return; }
+    this.showWordHighlightOverlay = visible;
+    if (!this.player) { return; }
+    if (visible) {
+      this.player.addClass('word-highlight-active');
+    } else {
+      this.player.removeClass('word-highlight-active');
+    }
+  }
+
+  private ensureWordHighlightCuesLoaded() {
+    if (!this.activeWordTrack || this.wordHighlightCues.length > 0 ||
+      !this.activeWordTrack.cues || this.activeWordTrack.cues.length === 0) {
+      return;
+    }
+    this.wordHighlightCues = Array.from(this.activeWordTrack.cues as any).sort((a: any, b: any) => a.startTime - b.startTime);
+  }
+
+  private updateWordHighlightOverlay(currentTime: number) {
+    if (!this.activeWordTrack) { return; }
+    this.ensureWordHighlightCuesLoaded();
+    let changed = false;
+    while (this.wordHighlightCueIndex < this.wordHighlightCues.length &&
+      this.wordHighlightCues[this.wordHighlightCueIndex].startTime <= currentTime) {
+      const cue = this.wordHighlightCues[this.wordHighlightCueIndex];
+      const gapBroken = cue.startTime - this.wordHighlightLastCueEnd > this.wordHighlightGapThresholdSeconds;
+      const prospectiveLength = this.wordHighlightLineWords.length === 0
+        ? cue.text.length
+        : this.wordHighlightLineWords.join(' ').length + 1 + cue.text.length;
+      const tooManyChars = this.wordHighlightLineWords.length > 0 &&
+        prospectiveLength > this.wordHighlightMaxLineCharacters;
+      if (gapBroken || tooManyChars) {
+        this.wordHighlightLineWords = [];
+      }
+      this.wordHighlightLastCueEnd = cue.endTime;
+      this.wordHighlightLineWords.push(cue.text);
+      this.wordHighlightCueIndex += 1;
+      changed = true;
+    }
+    // No new cue consumed this tick, but the last known word ended long
+    // enough ago (natural sentence gap, end of this VTT's coverage, or a VTT
+    // that never covered this part of the video at all) - clear the stale
+    // line so native captions take back over instead of freezing forever.
+    if (!changed && this.wordHighlightLineWords.length > 0 &&
+      (currentTime - this.wordHighlightLastCueEnd) > this.wordHighlightGapThresholdSeconds) {
+      this.wordHighlightLineWords = [];
+      changed = true;
+    }
+    if (changed) {
+      this.renderWordHighlightLine();
+    }
+    this.setWordHighlightOverlayVisible(this.wordHighlightLineWords.length > 0);
+  }
+
+  private rebuildWordHighlightAt(currentTime: number) {
+    if (!this.activeWordTrack) { return; }
+    this.ensureWordHighlightCuesLoaded();
+    this.wordHighlightCueIndex = 0;
+    while (this.wordHighlightCueIndex < this.wordHighlightCues.length &&
+      this.wordHighlightCues[this.wordHighlightCueIndex].startTime <= currentTime) {
+      this.wordHighlightCueIndex += 1;
+    }
+    this.wordHighlightLineWords = [];
+    this.wordHighlightLastCueEnd = 0;
+    let start = this.wordHighlightCueIndex - 1;
+    let charCount = start >= 0 ? this.wordHighlightCues[start].text.length : 0;
+    while (start >= 0) {
+      const gapBefore = start > 0
+        ? this.wordHighlightCues[start].startTime - this.wordHighlightCues[start - 1].endTime
+        : Infinity;
+      const prospectiveCharCount = start > 0 ? charCount + 1 + this.wordHighlightCues[start - 1].text.length : Infinity;
+      const tooManyChars = start > 0 && prospectiveCharCount > this.wordHighlightMaxLineCharacters;
+      if (gapBefore > this.wordHighlightGapThresholdSeconds || tooManyChars) { break; }
+      charCount = prospectiveCharCount;
+      start -= 1;
+    }
+    // Only treat the reconstructed line as still "live" if its last word's
+    // cue hasn't already ended beyond the gap threshold relative to
+    // currentTime - keeps seek behavior consistent with normal playback
+    // rather than showing a stale line the moment cues run out.
+    const lastIndex = this.wordHighlightCueIndex - 1;
+    if (lastIndex >= 0 && (currentTime - this.wordHighlightCues[lastIndex].endTime) <= this.wordHighlightGapThresholdSeconds) {
+      for (let i = Math.max(start, 0); i <= lastIndex; i++) {
+        this.wordHighlightLineWords.push(this.wordHighlightCues[i].text);
+        this.wordHighlightLastCueEnd = this.wordHighlightCues[i].endTime;
+      }
+    }
+    this.renderWordHighlightLine();
+    this.setWordHighlightOverlayVisible(this.wordHighlightLineWords.length > 0);
+  }
+
+  private renderWordHighlightLine() {
+    if (!this.wordHighlightLine) { return; }
+    this.wordHighlightLine.nativeElement.textContent = this.wordHighlightLineWords.join(' ');
   }
 
   toggleForwardRewindButton() {
@@ -444,6 +852,9 @@ export class VideoPlayerComponent implements AfterViewInit, OnInit, OnDestroy, O
   }
 
   ngOnDestroy() {
+    if (this.transcriptsUpdatedSubscription) {
+      this.transcriptsUpdatedSubscription.unsubscribe();
+    }
     if (this.player) {
       this.player.dispose();
     }
