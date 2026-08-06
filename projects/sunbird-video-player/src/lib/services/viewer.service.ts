@@ -110,9 +110,11 @@ export class ViewerService {
   // need the offline basePath prefix. Absolute URLs (e.g. a remote CDN
   // captions.vtt, as used for AI-generated transcripts) already resolve on
   // their own - prefixing them would concatenate the local basePath onto a
-  // full https:// URL and break caption loading entirely.
+  // full URL and break caption loading entirely. Matches any URI scheme
+  // (RFC 3986), not just "://" ones, so "data:"/"blob:" URLs aren't
+  // mistaken for relative paths and prefixed too.
   private isAbsoluteUrl(url: string): boolean {
-    return /^[a-zA-Z][a-zA-Z\d+\-.]*:\/\//.test(url) || url.startsWith('//');
+    return /^[a-zA-Z][a-zA-Z\d+\-.]*:/.test(url) || url.startsWith('//');
   }
 
   private prefixTranscriptUrls(transcripts: Transcripts, basePath: string): Transcripts {

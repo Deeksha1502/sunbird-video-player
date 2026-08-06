@@ -146,6 +146,24 @@ describe('ViewerService', () => {
     expect(service.transcripts[0].wordByWordUrl).toEqual('https://cdn.example.com/captions/en.vtt');
   });
 
+  it('should NOT prefix data: URI transcript urls when isAvailableLocally', () => {
+    const service = TestBed.inject(ViewerService);
+    const dataUri = 'data:text/vtt;base64,V0VCVlRU';
+    service.initialize({
+      context: {},
+      config: {},
+      metadata: {
+        name: 'Test', mimeType: 'video/mp4', identifier: 'do_1',
+        isAvailableLocally: true, basePath: 'file:///content/do_1', artifactUrl: 'video.mp4',
+        transcripts: [
+          { language: 'English', identifier: 'en', languageCode: 'en', artifactUrl: dataUri, wordByWordUrl: dataUri },
+        ],
+      },
+    } as any);
+    expect(service.transcripts[0].artifactUrl).toEqual(dataUri);
+    expect(service.transcripts[0].wordByWordUrl).toEqual(dataUri);
+  });
+
   it('should call getPlayerOptions for streamingUrl ', () => {
     const service = TestBed.inject(ViewerService);
     service.streamingUrl = 'abc.com';
