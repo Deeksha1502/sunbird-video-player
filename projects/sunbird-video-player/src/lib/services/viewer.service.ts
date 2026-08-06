@@ -96,13 +96,23 @@ export class ViewerService {
       this.localBasePath = basePath;
       this.streamingUrl = `${basePath}/${metadata.artifactUrl}`;
       this.mimeType = metadata.mimeType;
-      // Transcript/caption files ship inside the same offline .ecar bundle as
-      // the video and are expected to be relative paths, same as
-      // metadata.artifactUrl above - without this they'd resolve against the
-      // page origin instead of the local content basePath and fail to load
-      // when playing offline (e.g. downloaded content in the mobile app).
+      // Relative transcript/caption paths (shipped inside the same offline
+      // .ecar bundle as the video, same as metadata.artifactUrl above) need
+      // the local basePath prefix or they'd resolve against the page origin
+      // instead. Absolute URLs (e.g. a remote CDN captions.vtt for
+      // AI-generated transcripts) are left untouched by prefixTranscriptUrls -
+      // the video can be local while captions still load from the network.
       this.transcripts = this.prefixTranscriptUrls(this.transcripts, basePath);
     }
+  }
+
+  // Only relative paths (ECAR-bundled captions, shipped alongside the video)
+  // need the offline basePath prefix. Absolute URLs (e.g. a remote CDN
+  // captions.vtt, as used for AI-generated transcripts) already resolve on
+  // their own - prefixing them would concatenate the local basePath onto a
+  // full https:// URL and break caption loading entirely.
+  private isAbsoluteUrl(url: string): boolean {
+    return /^[a-zA-Z][a-zA-Z\d+\-.]*:\/\//.test(url) || url.startsWith('//');
   }
 
   private prefixTranscriptUrls(transcripts: Transcripts, basePath: string): Transcripts {
@@ -111,8 +121,10 @@ export class ViewerService {
     }
     return transcripts.map((trans) => ({
       ...trans,
-      artifactUrl: trans.artifactUrl ? `${basePath}/${trans.artifactUrl}` : trans.artifactUrl,
-      wordByWordUrl: trans.wordByWordUrl ? `${basePath}/${trans.wordByWordUrl}` : trans.wordByWordUrl
+      artifactUrl: (trans.artifactUrl && !this.isAbsoluteUrl(trans.artifactUrl))
+        ? `${basePath}/${trans.artifactUrl}` : trans.artifactUrl,
+      wordByWordUrl: (trans.wordByWordUrl && !this.isAbsoluteUrl(trans.wordByWordUrl))
+        ? `${basePath}/${trans.wordByWordUrl}` : trans.wordByWordUrl
     }));
   }
   handleTranscriptsData(selectedTranscripts) {

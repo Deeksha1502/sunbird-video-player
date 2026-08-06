@@ -112,6 +112,40 @@ describe('ViewerService', () => {
     expect(service.mimeType).toEqual(mockData.playerConfig.metadata.mimeType);
     expect(service.artifactMimeType).toEqual(mockData.playerConfig.metadata.mimeType);
   });
+  it('should prefix relative transcript urls with basePath when isAvailableLocally', () => {
+    const service = TestBed.inject(ViewerService);
+    service.initialize({
+      context: {},
+      config: {},
+      metadata: {
+        name: 'Test', mimeType: 'video/mp4', identifier: 'do_1',
+        isAvailableLocally: true, basePath: 'file:///content/do_1', artifactUrl: 'video.mp4',
+        transcripts: [
+          { language: 'English', identifier: 'en', languageCode: 'en', artifactUrl: 'captions/en.vtt', wordByWordUrl: 'captions/en.vtt' },
+        ],
+      },
+    } as any);
+    expect(service.transcripts[0].artifactUrl).toEqual('file:///content/do_1/captions/en.vtt');
+    expect(service.transcripts[0].wordByWordUrl).toEqual('file:///content/do_1/captions/en.vtt');
+  });
+
+  it('should NOT prefix absolute (remote CDN) transcript urls when isAvailableLocally', () => {
+    const service = TestBed.inject(ViewerService);
+    service.initialize({
+      context: {},
+      config: {},
+      metadata: {
+        name: 'Test', mimeType: 'video/mp4', identifier: 'do_1',
+        isAvailableLocally: true, basePath: 'file:///content/do_1', artifactUrl: 'video.mp4',
+        transcripts: [
+          { language: 'English', identifier: 'en', languageCode: 'en', artifactUrl: 'https://cdn.example.com/captions/en.vtt', wordByWordUrl: 'https://cdn.example.com/captions/en.vtt' },
+        ],
+      },
+    } as any);
+    expect(service.transcripts[0].artifactUrl).toEqual('https://cdn.example.com/captions/en.vtt');
+    expect(service.transcripts[0].wordByWordUrl).toEqual('https://cdn.example.com/captions/en.vtt');
+  });
+
   it('should call getPlayerOptions for streamingUrl ', () => {
     const service = TestBed.inject(ViewerService);
     service.streamingUrl = 'abc.com';

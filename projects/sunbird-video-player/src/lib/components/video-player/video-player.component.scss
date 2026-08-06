@@ -222,6 +222,18 @@ div[data-marker-key] {
   display: none !important;
 }
 
+// Safari/WebKit renders its OWN native caption UI on <video> via this pseudo-
+// element, independently of - and in addition to - video.js's custom
+// .vjs-text-track-display above. video.js does not suppress it on its own,
+// so both render at once on Safari: the native WebKit captions plus video.js's
+// (or the word-highlight overlay's) rendering of the same cue text - visible
+// as captions appearing twice, stacked, only on Safari (Chrome/Firefox have
+// no equivalent native overlay, so this is Safari-specific).
+:host ::ng-deep .video-js video::-webkit-media-text-track-display,
+:host ::ng-deep .video-js video::-webkit-media-text-track-container {
+  display: none !important;
+}
+
 // Sibling of <video>, positioned against the same ancestor
 // (.sunbird-video-player-container, position:relative) that
 // .player-for-back-ward-controls above already uses to align exactly to the
